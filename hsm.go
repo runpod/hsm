@@ -556,6 +556,12 @@ func Transition[T interface{ RedefinableElement | string }](nameOrPartialElement
 			}
 		} else {
 			model.push(func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+				if transition.source == model.QualifiedName() && transition.target != "" {
+					traceback(fmt.Errorf("top level transitions must have a source and target, or no source and target"))
+				}
+				if kind.IsKind(transition.kind, kind.Internal) && transition.effect == "" {
+					traceback(fmt.Errorf("internal transitions require an effect"))
+				}
 				// precompute transition paths for the source state and nested states
 				for qualifiedName, element := range model.namespace {
 					if strings.HasPrefix(qualifiedName, transition.source) && kind.IsKind(element.Kind(), kind.Vertex, kind.StateMachine) {
@@ -1074,9 +1080,34 @@ func After[T Context](expr func(ctx context.Context, hsm T, event Event) time.Du
 //	    )
 //	)
 func Final(name string) RedefinableElement {
-	return func(builder *Model, stack []elements.NamedElement) elements.NamedElement {
-		traceback(fmt.Errorf("not implemented"))
-		return nil
+	traceback := traceback()
+	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+		owner := find(stack, kind.StateMachine, kind.State)
+		if owner == nil {
+			traceback(fmt.Errorf("final \"%s\" must be called within Define() or State()", name))
+		}
+		state := &state{
+			vertex: vertex{element: element{kind: kind.FinalState, qualifiedName: path.Join(owner.QualifiedName(), name)}, transitions: []string{}},
+		}
+		model.namespace[state.QualifiedName()] = state
+		model.push(
+			func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+				if len(state.transitions) > 0 {
+					traceback(fmt.Errorf("final state \"%s\" cannot have transitions", state.QualifiedName()))
+				}
+				if len(state.activities) > 0 {
+					traceback(fmt.Errorf("final state \"%s\" cannot have activities", state.QualifiedName()))
+				}
+				if state.entry != "" {
+					traceback(fmt.Errorf("final state \"%s\" cannot have an entry action", state.QualifiedName()))
+				}
+				if state.exit != "" {
+					traceback(fmt.Errorf("final state \"%s\" cannot have an exit action", state.QualifiedName()))
+				}
+				return state
+			},
+		)
+		return state
 	}
 }
 
@@ -1440,6 +1471,8 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 				return sm.transition(ctx, element, transition, event)
 			}
 		}
+	case kind.FinalState:
+		return element
 	}
 	return nil
 }

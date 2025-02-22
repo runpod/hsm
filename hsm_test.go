@@ -91,7 +91,6 @@ func TestHSM(t *testing.T) {
 				hsm.Activity(mockAction("s1.activity", true)),
 				hsm.Transition(hsm.Trigger("I"), hsm.Effect(mockAction("s1.I.transition.effect", false))),
 				hsm.Transition(hsm.Trigger("A"), hsm.Target("/s/s1"), hsm.Effect(mockAction("s1.A.transition.effect", false))),
-				hsm.Transition(hsm.Trigger("0")),
 			),
 			hsm.Transition(hsm.Trigger("D"), hsm.Source("/s/s1/s11"), hsm.Target("/s/s1"), hsm.Effect(mockAction("s11.D.transition.effect", false)), hsm.Guard(
 				func(ctx context.Context, hsm *THSM, event hsm.Event) bool {
@@ -129,6 +128,7 @@ func TestHSM(t *testing.T) {
 			hsm.Transition(hsm.Trigger(`*.P.*`), hsm.Effect(mockAction("s11.P.transition.effect", false))),
 		),
 		hsm.State("t"),
+		hsm.Final("exit"),
 		hsm.Initial(
 			hsm.Target(hsm.Choice(
 				"initial_choice",
@@ -183,6 +183,7 @@ func TestHSM(t *testing.T) {
 		})),
 		hsm.Transition(hsm.Trigger("K"), hsm.Source("/s/s1/s11"), hsm.Target("/s/s3"), hsm.Effect(mockAction("s11.K.transition.effect", false))),
 		hsm.Transition(hsm.Trigger("Z"), hsm.Effect(mockAction("Z.transition.effect", false))),
+		hsm.Transition(hsm.Trigger("X"), hsm.Effect(mockAction("X.transition.effect", false)), hsm.Source("/s/s3"), hsm.Target("/exit")),
 	)
 	sm := hsm.Start(ctx, &THSM{
 		foo: 0,
@@ -391,6 +392,9 @@ func TestHSM(t *testing.T) {
 	}
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{Name: "Z", Done: make(chan struct{})})
+	if sm.State() != "/s/s3" {
+		t.Fatal("state is not correct after Z", "state", sm.State())
+	}
 	if !trace.contains(
 		Trace{
 			sync: []string{"Z.transition.effect"},
@@ -399,15 +403,24 @@ func TestHSM(t *testing.T) {
 		t.Fatal("transition actions are not correct", "trace", trace)
 	}
 	trace.reset()
+	<-sm.Dispatch(ctx, hsm.Event{
+		Name: "X",
+		Done: make(chan struct{}),
+	})
+	if sm.State() != "/exit" {
+		t.Fatal("state is not correct after X", "state", sm.State())
+	}
+	if !trace.matches(Trace{
+		sync: []string{"s3.exit", "s.exit", "X.transition.effect"},
+	}) {
+		t.Fatal("transition actions are not correct", "trace", trace)
+	}
+	trace.reset()
 	<-sm.Stop(ctx)
 	if sm.State() != "" {
 		t.Fatal("state is not correct", "state", sm.State())
 	}
-	if !trace.matches(Trace{
-		sync: []string{"s3.exit", "s.exit"},
-	}) {
-		t.Fatal("transition actions are not correct", "trace", trace)
-	}
+
 }
 
 func TestMatch(t *testing.T) {
