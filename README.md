@@ -1,8 +1,5 @@
 # hsm [![PkgGoDev](https://pkg.go.dev/badge/github.com/runpod/hsm)](https://pkg.go.dev/github.com/runpod/hsm)
 
-> **Warning**
-> This package is currently in alpha stage. While it has test coverage, the API is subject to breaking changes between minor versions until we reach v1.0.0. Please pin your dependencies to specific versions.
-
 Package go-hsm provides a powerful hierarchical state machine (HSM) implementation for Go. State machines help manage complex application states and transitions in a clear, maintainable way.
 
 ## Installation
