@@ -429,7 +429,6 @@ func State(name string, partialElements ...RedefinableElement) RedefinableElemen
 				hasWildcardJ := hasWildcard(transitionJ.events...)
 				return !hasWildcardI && hasWildcardJ
 			})
-			slog.Info("sorted transitions", "transitions", element.transitions)
 			return element
 		})
 		return element
