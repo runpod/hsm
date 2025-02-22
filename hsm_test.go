@@ -141,6 +141,7 @@ func TestHSM(t *testing.T) {
 				return check
 			},
 		)),
+		hsm.Transition("wildcard", hsm.Trigger("abcd*"), hsm.Source("/s"), hsm.Target("/s")),
 		hsm.Transition(hsm.Trigger(dEvent), hsm.Source("/s"), hsm.Target("/s"), hsm.Effect(mockAction("s.D.transition.effect", false))),
 		hsm.Transition(hsm.Trigger("C"), hsm.Source("/s/s1"), hsm.Target("/s/s2"), hsm.Effect(mockAction("s1.C.transition.effect", false))),
 		hsm.Transition(hsm.Trigger("E"), hsm.Source("/s"), hsm.Target("/s/s1/s11"), hsm.Effect(mockAction("s.E.transition.effect", false))),
