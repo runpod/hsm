@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/stateforward/go-hsm/elements"
-	"github.com/stateforward/go-hsm/kind"
+	"github.com/runpod/hsm/elements"
+	"github.com/runpod/hsm/kind"
 )
 
 var (

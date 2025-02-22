@@ -1,3 +1,3 @@
-module github.com/stateforward/go-hsm
+module github.com/runpod/hsm
 
 go 1.22.5

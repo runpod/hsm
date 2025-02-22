@@ -1,4 +1,4 @@
-# go-hsm [![PkgGoDev](https://pkg.go.dev/badge/github.com/stateforward/go-hsm)](https://pkg.go.dev/github.com/stateforward/go-hsm)
+# hsm [![PkgGoDev](https://pkg.go.dev/badge/github.com/runpod/hsm)](https://pkg.go.dev/github.com/runpod/hsm)
 
 > **Warning**
 > This package is currently in alpha stage. While it has test coverage, the API is subject to breaking changes between minor versions until we reach v1.0.0. Please pin your dependencies to specific versions.
@@ -8,7 +8,7 @@ Package go-hsm provides a powerful hierarchical state machine (HSM) implementati
 ## Installation
 
 ```bash
-go get github.com/stateforward/go-hsm
+go get github.com/runpod/hsm
 ```
 
 ## Key Features

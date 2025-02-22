@@ -36,7 +36,7 @@ type Vertex interface {
 type State interface {
 	Vertex
 	Entry() string
-	Activity() string
+	Activities() []string
 	Exit() string
 }
 

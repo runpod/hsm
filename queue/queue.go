@@ -3,7 +3,7 @@ package queue
 import (
 	"context"
 
-	"github.com/stateforward/go-hsm/elements"
+	"github.com/runpod/hsm/elements"
 )
 
 var NonBlocking = func() context.Context {

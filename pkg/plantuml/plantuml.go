@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/stateforward/go-hsm/elements"
-	"github.com/stateforward/go-hsm/kind"
+	"github.com/runpod/hsm/elements"
+	"github.com/runpod/hsm/kind"
 )
 
 func idFromQualifiedName(qualifiedName string) string {
@@ -63,8 +63,12 @@ func generateState(builder *strings.Builder, depth int, state elements.NamedElem
 		if entry := state.Entry(); entry != "" {
 			fmt.Fprintf(builder, "%sstate %s: entry / %s\n", indent, id, idFromQualifiedName(path.Base(entry)))
 		}
-		if activity := state.Activity(); activity != "" {
-			fmt.Fprintf(builder, "%sstate %s: activity / %s\n", indent, id, idFromQualifiedName(path.Base(activity)))
+		if len(state.Activities()) > 0 {
+			activities := []string{}
+			for _, activity := range state.Activities() {
+				activities = append(activities, idFromQualifiedName(path.Base(activity)))
+			}
+			fmt.Fprintf(builder, "%sstate %s: activities %s\n", indent, id, strings.Join(activities, ", "))
 		}
 		if exit := state.Exit(); exit != "" {
 			fmt.Fprintf(builder, "%sstate %s: exit / %s\n", indent, id, idFromQualifiedName(path.Base(exit)))
