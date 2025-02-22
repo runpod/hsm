@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -326,10 +327,6 @@ func find(stack []elements.NamedElement, maybeKinds ...uint64) elements.NamedEle
 	return nil
 }
 
-func isKind(el elements.NamedElement, k uint64) bool {
-	return kind.IsKind(el.Kind(), k)
-}
-
 func traceback(maybeError ...error) func(err error) {
 	_, file, line, _ := runtime.Caller(2)
 	fn := func(err error) {
@@ -376,6 +373,15 @@ func id() string {
 	return strconv.FormatUint((timestamp<<idCounterBits)|counter, 32)
 }
 
+func hasWildcard(events ...Event) bool {
+	for _, event := range events {
+		if strings.Contains(event.Name, "*") {
+			return true
+		}
+	}
+	return false
+}
+
 // State creates a new state element with the given name and optional child elements.
 // States can have entry/exit actions, activities, and transitions.
 //
@@ -394,7 +400,7 @@ func id() string {
 //	)
 func State(name string, partialElements ...RedefinableElement) RedefinableElement {
 	traceback := traceback()
-	return func(graph *Model, stack []elements.NamedElement) elements.NamedElement {
+	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
 		owner := find(stack, kind.StateMachine, kind.State)
 		if owner == nil {
 			traceback(fmt.Errorf("state \"%s\" must be called within Define() or State()", name))
@@ -402,9 +408,29 @@ func State(name string, partialElements ...RedefinableElement) RedefinableElemen
 		element := &state{
 			vertex: vertex{element: element{kind: kind.State, qualifiedName: path.Join(owner.QualifiedName(), name)}, transitions: []string{}},
 		}
-		graph.namespace[element.QualifiedName()] = element
+		model.namespace[element.QualifiedName()] = element
 		stack = append(stack, element)
-		apply(graph, stack, partialElements...)
+		apply(model, stack, partialElements...)
+		model.push(func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+			// Sort transitions so wildcard events are at the end
+			sort.SliceStable(element.transitions, func(i, j int) bool {
+				transitionI := get[*transition](model, element.transitions[i])
+				if transitionI == nil {
+					traceback(fmt.Errorf("missing transition \"%s\" for state \"%s\"", element.transitions[i], element.QualifiedName()))
+					return false
+				}
+				transitionJ := get[*transition](model, element.transitions[j])
+				if transitionJ == nil {
+					traceback(fmt.Errorf("missing transition \"%s\" for state \"%s\"", element.transitions[j], element.QualifiedName()))
+					return false // because the linter doesn't know that traceback will panic
+				}
+				// If j has wildcard and i doesn't, i comes first
+				hasWildcardI := hasWildcard(transitionI.events...)
+				hasWildcardJ := hasWildcard(transitionJ.events...)
+				return !hasWildcardI && hasWildcardJ
+			})
+			return element
+		})
 		return element
 	}
 }
