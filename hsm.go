@@ -1444,7 +1444,7 @@ func (sm *hsm[T]) start(active Context) {
 	if !ok {
 		all = &sync.Map{}
 	}
-	subcontext := sm.activate(context.WithValue(context.WithValue(active, Keys.All, all), Keys.HSM, sm), sm)
+	subcontext := sm.activate(context.WithValue(context.WithValue(sm.subcontext, Keys.All, all), Keys.HSM, sm), sm)
 	sm.subcontext = subcontext
 	all.Store(sm.id, sm)
 	sm.execute(sm.subcontext, &sm.behavior, InitialEvent)
