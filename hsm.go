@@ -141,6 +141,7 @@ type state struct {
 	entry      string
 	exit       string
 	activities []string
+	deferred   []string
 }
 
 func (state *state) Entry() string {
@@ -242,11 +243,11 @@ type queue struct {
 	events []Event
 }
 
-func (q *queue) len() int {
-	q.mutex.RLock()
-	defer q.mutex.RUnlock()
-	return len(q.events)
-}
+// func (q *queue) len() int {
+// 	q.mutex.RLock()
+// 	defer q.mutex.RUnlock()
+// 	return len(q.events)
+// }
 
 func (q *queue) pop() (Event, bool) {
 	q.mutex.Lock()
@@ -259,13 +260,17 @@ func (q *queue) pop() (Event, bool) {
 	return event, true
 }
 
-func (q *queue) push(event Event) {
-	q.mutex.Lock()
-	defer q.mutex.Unlock()
-	if kind.IsKind(event.Kind, kind.CompletionEvent) {
-		q.events = append([]Event{event}, q.events...)
-	} else {
-		q.events = append(q.events, event)
+func (q *queue) push(events ...Event) {
+	for _, event := range events {
+		if kind.IsKind(event.Kind, kind.CompletionEvent) {
+			q.mutex.Lock()
+			q.events = append([]Event{event}, q.events...)
+			q.mutex.Unlock()
+		} else {
+			q.mutex.Lock()
+			q.events = append(q.events, event)
+			q.mutex.Unlock()
+		}
 	}
 }
 
@@ -313,7 +318,13 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 	}
 
 	if model.initial == "" {
-		panic(fmt.Errorf("initial state not found for model %s", model.Id()))
+		panic(fmt.Errorf("initial state is required for state machine %s", model.Id()))
+	}
+	if model.entry != "" {
+		panic(fmt.Errorf("entry actions are not allowed on top level state machine %s", model.Id()))
+	}
+	if model.exit != "" {
+		panic(fmt.Errorf("exit actions are not allowed on top level state machine %s", model.Id()))
 	}
 	return model
 }
@@ -666,9 +677,27 @@ func Source[T interface{ RedefinableElement | string }](nameOrPartialElement T) 
 	}
 }
 
-func Defer(events ...uint64) RedefinableElement {
-	traceback(fmt.Errorf("not implemented"))
-	return nil
+func Defer[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
+	traceback := traceback()
+	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+		state, ok := find(stack, kind.State).(*state)
+		if !ok {
+			traceback(fmt.Errorf("defer must be called within a State"))
+		}
+		for _, event := range events {
+			switch evt := any(event).(type) {
+			case string:
+				state.deferred = append(state.deferred, evt)
+			case *Event:
+				state.deferred = append(state.deferred, evt.Name)
+			case Event:
+				state.deferred = append(state.deferred, evt.Name)
+			default:
+				traceback(fmt.Errorf("defer must be called with a string, *Event, or Event"))
+			}
+		}
+		return state
+	}
 }
 
 // Target specifies the target state of a transition.
@@ -1137,6 +1166,17 @@ func Final(name string) RedefinableElement {
 	}
 }
 
+func Submachine(name string, partialElements ...RedefinableElement) RedefinableElement {
+	traceback := traceback()
+	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+		owner := find(stack, kind.StateMachine)
+		if owner == nil {
+			traceback(fmt.Errorf("submachine \"%s\" must be called within Define()", name))
+		}
+		return nil
+	}
+}
+
 // Context represents an active state machine instance that can process events and track state.
 // It provides methods for event dispatch and state management.
 type Context interface {
@@ -1198,7 +1238,7 @@ type subcontext = context.Context
 type active struct {
 	subcontext
 	cancel  context.CancelFunc
-	channel chan bool
+	channel chan struct{}
 }
 
 type timeouts struct {
@@ -1210,7 +1250,7 @@ type hsm[T Context] struct {
 	behavior[T]
 	state      elements.NamedElement
 	model      *Model
-	active     map[any]*active
+	active     map[string]*active
 	queue      queue
 	context    T
 	trace      Trace
@@ -1246,88 +1286,94 @@ var Keys = struct {
 	HSM: key[HSM]{},
 }
 
-func Match(state, pattern string) bool {
-	var lastErotemeCluster byte
-	var patternIndex, sIndex, lastStar, lastEroteme int
-	patternLen := len(pattern)
-	sLen := len(state)
-	star := -1
-	eroteme := -1
+func Match(state string, patterns ...string) bool {
+	for _, pattern := range patterns {
+		var lastErotemeCluster byte
+		var patternIndex, sIndex, lastStar, lastEroteme int
+		patternLen := len(pattern)
+		sLen := len(state)
+		star := -1
+		eroteme := -1
 
-Loop:
-	if sIndex >= sLen {
-		goto checkPattern
-	}
-
-	if patternIndex >= patternLen {
-		if star != -1 {
-			patternIndex = star + 1
-			lastStar++
-			sIndex = lastStar
-			goto Loop
+	Loop:
+		if sIndex >= sLen {
+			goto checkPattern
 		}
-		return false
-	}
-	switch pattern[patternIndex] {
-	case '.':
-		// It matches any single character. So, we don't need to check anything.
-	case '?':
-		// '?' matches one character. Store its position and match exactly one character in the string.
-		eroteme = patternIndex
-		lastEroteme = sIndex
-		lastErotemeCluster = byte(state[sIndex])
-	case '*':
-		// '*' matches zero or more characters. Store its position and increment the pattern index.
-		star = patternIndex
-		lastStar = sIndex
-		patternIndex++
-		goto Loop
-	default:
-		// If the characters don't match, check if there was a previous '?' or '*' to backtrack.
-		if pattern[patternIndex] != state[sIndex] {
-			if eroteme != -1 {
-				patternIndex = eroteme + 1
-				sIndex = lastEroteme
-				eroteme = -1
-				goto Loop
-			}
 
+		if patternIndex >= patternLen {
 			if star != -1 {
 				patternIndex = star + 1
 				lastStar++
 				sIndex = lastStar
 				goto Loop
 			}
-
-			return false
+			continue
 		}
-
-		// If the characters match, check if it was not the same to validate the eroteme.
-		if eroteme != -1 && lastErotemeCluster != byte(state[sIndex]) {
-			eroteme = -1
-		}
-	}
-
-	patternIndex++
-	sIndex++
-	goto Loop
-
-	// Check if the remaining pattern characters are '*' or '?', which can match the end of the string.
-checkPattern:
-	if patternIndex < patternLen {
-		if pattern[patternIndex] == '*' {
+		switch pattern[patternIndex] {
+		case '.':
+			// It matches any single character. So, we don't need to check anything.
+		case '?':
+			// '?' matches one character. Store its position and match exactly one character in the string.
+			eroteme = patternIndex
+			lastEroteme = sIndex
+			lastErotemeCluster = byte(state[sIndex])
+		case '*':
+			// '*' matches zero or more characters. Store its position and increment the pattern index.
+			star = patternIndex
+			lastStar = sIndex
 			patternIndex++
-			goto checkPattern
-		} else if pattern[patternIndex] == '?' {
-			if sIndex >= sLen {
-				sIndex--
+			goto Loop
+		default:
+			// If the characters don't match, check if there was a previous '?' or '*' to backtrack.
+			if pattern[patternIndex] != state[sIndex] {
+				if eroteme != -1 {
+					patternIndex = eroteme + 1
+					sIndex = lastEroteme
+					eroteme = -1
+					goto Loop
+				}
+
+				if star != -1 {
+					patternIndex = star + 1
+					lastStar++
+					sIndex = lastStar
+					goto Loop
+				}
+
+				continue
 			}
-			patternIndex++
-			goto checkPattern
+
+			// If the characters match, check if it was not the same to validate the eroteme.
+			if eroteme != -1 && lastErotemeCluster != byte(state[sIndex]) {
+				eroteme = -1
+			}
+		}
+
+		patternIndex++
+		sIndex++
+		goto Loop
+
+		// Check if the remaining pattern characters are '*' or '?', which can match the end of the string.
+	checkPattern:
+		if patternIndex < patternLen {
+			if pattern[patternIndex] == '*' {
+				patternIndex++
+				goto checkPattern
+			} else if pattern[patternIndex] == '?' {
+				if sIndex >= sLen {
+					sIndex--
+				}
+				patternIndex++
+				goto checkPattern
+			}
+		}
+
+		if patternIndex == patternLen {
+			return true
 		}
 	}
+	return false
 
-	return patternIndex == patternLen
 }
 
 // Start creates and starts a new state machine instance with the given model and configuration.
@@ -1350,10 +1396,12 @@ func Start[T Context](ctx context.Context, sm T, model *Model, config ...Config)
 				kind: kind.StateMachine,
 			},
 		},
-		model:   model,
-		active:  map[any]*active{},
-		context: sm,
-		queue:   queue{},
+		model:      model,
+		state:      &model.state,
+		active:     map[string]*active{},
+		context:    sm,
+		queue:      queue{},
+		subcontext: ctx,
 	}
 	hsm.processing.Lock()
 	if len(config) > 0 {
@@ -1371,14 +1419,8 @@ func Start[T Context](ctx context.Context, sm T, model *Model, config ...Config)
 	if hsm.timeouts.terminate == 0 {
 		hsm.timeouts.terminate = time.Millisecond
 	}
-	all, ok := ctx.Value(Keys.All).(*sync.Map)
-	if !ok {
-		all = &sync.Map{}
-	}
-	hsm.subcontext = context.WithValue(context.WithValue(context.Background(), Keys.All, all), Keys.HSM, hsm)
-	all.Store(hsm.id, hsm)
 	hsm.method = func(ctx context.Context, _ T, event Event) {
-		hsm.state = hsm.initial(ctx, &hsm.model.state, event)
+		hsm.state = hsm.enter(ctx, hsm.state, event, true)
 		hsm.process(ctx)
 	}
 	sm.start(hsm)
@@ -1398,7 +1440,15 @@ func (sm *hsm[T]) State() string {
 }
 
 func (sm *hsm[T]) start(active Context) {
+	all, ok := active.Value(Keys.All).(*sync.Map)
+	if !ok {
+		all = &sync.Map{}
+	}
+	subcontext := sm.activate(context.WithValue(context.WithValue(active, Keys.All, all), Keys.HSM, sm), sm)
+	sm.subcontext = subcontext
+	all.Store(sm.id, sm)
 	sm.execute(sm.subcontext, &sm.behavior, InitialEvent)
+	subcontext.channel <- struct{}{}
 }
 
 func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
@@ -1411,22 +1461,29 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 		defer end()
 	}
 	done := make(chan struct{})
-	sm.processing.Lock()
 	go func() {
+		sm.processing.Lock()
+
 		var ok bool
 		for sm.state != nil {
-			sm.exit(ctx, sm.state, noevent)
-			sm.state, ok = sm.model.namespace[sm.state.Owner()]
-			if !ok {
-				break
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				sm.exit(ctx, sm.state, noevent)
+				sm.state, ok = sm.model.namespace[sm.state.Owner()]
+				if ok {
+					continue
+				}
 			}
+			break
+		}
+		if all, ok := sm.Value(Keys.All).(*sync.Map); ok {
+			all.Delete(sm.id)
 		}
 		close(done)
 		sm.processing.Unlock()
 	}()
-	if all, ok := sm.Value(Keys.All).(*sync.Map); ok {
-		all.Delete(sm.id)
-	}
 	return done
 }
 
@@ -1446,18 +1503,19 @@ func Stop(ctx context.Context) {
 	hsm.Stop(ctx)
 }
 
-func (sm *hsm[T]) activate(ctx context.Context, key any) *active {
-	if key == nil {
+func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *active {
+	if element == nil {
 		return nil
 	}
-	current, ok := sm.active[key]
+	qualifiedName := element.QualifiedName()
+	current, ok := sm.active[qualifiedName]
 	if !ok {
 		current = &active{
-			channel: make(chan bool, 1),
+			channel: make(chan struct{}, 1),
 		}
-		sm.active[key] = current
+		sm.active[qualifiedName] = current
 	}
-	current.subcontext, current.cancel = context.WithCancel(context.WithValue(ctx, &sm.active, key))
+	current.subcontext, current.cancel = context.WithCancel(context.WithValue(ctx, &sm.active, element))
 	return current
 }
 
@@ -1498,6 +1556,9 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 			}
 		}
 	case kind.FinalState:
+		if element.Owner() == "/" {
+			sm.terminate(ctx, sm)
+		}
 		return element
 	}
 	return nil
@@ -1557,13 +1618,13 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event Event
 	}
 	switch element.Kind() {
 	case kind.Concurrent:
-		ctx := sm.activate(ctx, element.QualifiedName())
+		ctx := sm.activate(ctx, element)
 		go func(ctx *active, end func(...any)) {
 			if end != nil {
 				defer end()
 			}
 			element.method(ctx, sm.context, event)
-			ctx.channel <- true
+			ctx.channel <- struct{}{}
 		}(ctx, end)
 	default:
 		element.method(ctx, sm.context, event)
@@ -1631,15 +1692,15 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 	return current
 }
 
-func (sm *hsm[T]) terminate(ctx context.Context, behavior elements.NamedElement) {
-	if sm == nil || behavior == nil {
+func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) {
+	if sm == nil || element == nil {
 		return
 	}
 	if sm.trace != nil {
-		_, end := sm.trace(ctx, "terminate", behavior)
+		_, end := sm.trace(ctx, "terminate", element)
 		defer end()
 	}
-	active, ok := sm.active[behavior.QualifiedName()]
+	active, ok := sm.active[element.QualifiedName()]
 	if !ok {
 		return
 	}
@@ -1647,7 +1708,7 @@ func (sm *hsm[T]) terminate(ctx context.Context, behavior elements.NamedElement)
 	select {
 	case <-active.channel:
 	case <-time.After(sm.timeouts.terminate):
-		slog.Error("terminate timeout", "behavior", behavior.QualifiedName())
+		slog.Error("terminate timeout", "behavior", element.QualifiedName())
 	}
 
 }
@@ -1685,11 +1746,12 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		ctx, end = sm.trace(ctx, "process")
 		defer end()
 	}
+	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
 		qualifiedName := sm.state.QualifiedName()
 		for qualifiedName != "" {
-			source := get[elements.Vertex](sm.model, qualifiedName)
+			source := get[*state](sm.model, qualifiedName)
 			if source == nil {
 				break
 			}
@@ -1700,11 +1762,16 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				sm.mutex.Unlock()
 				break
 			}
+			if matches := Match(event.Name, source.deferred...); matches {
+				deferred = append(deferred, event)
+				break
+			}
 			qualifiedName = source.Owner()
 		}
 		done(event.Done)
 		event, ok = sm.queue.pop()
 	}
+	sm.queue.push(deferred...)
 	sm.processing.Unlock()
 }
 

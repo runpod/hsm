@@ -299,7 +299,7 @@ func TestHSM(t *testing.T) {
 		Name: "E",
 		Done: make(chan struct{}),
 	})
-	if sm.State() != "/s/s1/s11" {
+	if !hsm.Match(sm.State(), "/s/s1/s11") {
 		t.Fatal("state is not correct", "state", sm.State())
 	}
 	if !trace.matches(Trace{
@@ -415,6 +415,11 @@ func TestHSM(t *testing.T) {
 		sync: []string{"s3.exit", "s.exit", "X.transition.effect"},
 	}) {
 		t.Fatal("transition actions are not correct", "trace", trace)
+	}
+	select {
+	case <-sm.Done():
+	default:
+		t.Fatal("sm is not done after entering top level final state")
 	}
 	trace.reset()
 	<-sm.Stop(ctx)
