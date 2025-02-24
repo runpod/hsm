@@ -11,7 +11,7 @@ go get github.com/runpod/hsm
 ## Key Features
 
 - Hierarchical state organization
-- Entry, exit, and activity actions for states
+- Entry, exit, and multiple activity actions for states
 - Guard conditions and transition effects
 - Event-driven transitions
 - Time-based transitions
@@ -20,6 +20,9 @@ go get github.com/runpod/hsm
 - Multiple state machine instances with broadcast support
 - Event completion tracking with Done channels
 - Tracing support for state transitions
+- Event deferral support
+- State machine-level activity actions
+- Automatic termination with final states
 
 ## Core Concepts
 
@@ -98,7 +101,7 @@ sm.Dispatch(event)
 
 ### State Actions
 
-States can have three types of actions:
+States can have multiple types of actions:
 
 ```go
 type MyHSM struct {
@@ -112,14 +115,24 @@ hsm.State("active",
         log.Println("Entering active state")
     }),
 
-    // Activity action - long-running operation with context
+    // Multiple activity actions - long-running operations with context
     hsm.Activity(func(ctx context.Context, hsm *MyHSM, event hsm.Event) {
         for {
             select {
             case <-ctx.Done():
                 return
             case <-time.After(time.Second):
-                log.Println("Activity tick")
+                log.Println("Activity 1 tick")
+            }
+        }
+    }),
+    hsm.Activity(func(ctx context.Context, hsm *MyHSM, event hsm.Event) {
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-time.After(2 * time.Second):
+                log.Println("Activity 2 tick")
             }
         }
     }),
@@ -128,6 +141,64 @@ hsm.State("active",
     hsm.Exit(func(ctx context.Context, hsm *MyHSM, event hsm.Event) {
         log.Println("Exiting active state")
     })
+)
+```
+
+### State Machine Actions
+
+The state machine itself can have activity actions:
+
+```go
+model := hsm.Define(
+    "example",
+    // Activity action for the entire state machine
+    hsm.Activity(func(ctx context.Context, hsm *MyHSM, event hsm.Event) {
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case <-time.After(time.Second):
+                log.Println("State machine background activity")
+            }
+        }
+    }),
+
+    // States and transitions...
+)
+```
+
+### Event Deferral
+
+States can defer events to be processed later:
+
+```go
+hsm.State("busy",
+    // Defer "update" events until we leave this state
+    hsm.Defer("update"),
+
+    hsm.Transition(
+        hsm.Trigger("complete"),
+        hsm.Target("idle")
+        // When transitioning to idle, deferred "update" events will be processed
+    )
+)
+```
+
+### Final States
+
+A top-level final state will automatically terminate the state machine:
+
+```go
+model := hsm.Define(
+    "example",
+    hsm.State("active"),
+    hsm.State("final", hsm.Final()),  // This is a final state
+    hsm.Transition(
+        hsm.Trigger("complete"),
+        hsm.Source("active"),
+        hsm.Target("final")           // Transitioning here will terminate the state machine
+    ),
+    hsm.Initial("active")
 )
 ```
 

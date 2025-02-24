@@ -75,8 +75,6 @@ func TestHSM(t *testing.T) {
 	ctx := context.Background()
 	model := hsm.Define(
 		"TestHSM",
-		hsm.Entry(mockAction("TestHSM.entry", false)),
-		hsm.Exit(mockAction("TestHSM.exit", false)),
 		hsm.State("s",
 			hsm.Entry(mockAction("s.entry", false)),
 			hsm.Activity(mockAction("s.activity", true)),
@@ -200,7 +198,7 @@ func TestHSM(t *testing.T) {
 		t.Fatal("Initial state is not /s/s2/s21/s211", "state", sm.State())
 	}
 	if !trace.matches(Trace{
-		sync: []string{"TestHSM.entry", "initial.effect", "s.entry", "s2.entry", "s2.initial.effect", "s21.entry", "s211.entry"},
+		sync: []string{"initial.effect", "s.entry", "s2.entry", "s2.initial.effect", "s21.entry", "s211.entry"},
 	}) {
 		t.Fatal("Trace is not correct", "trace", trace)
 	}

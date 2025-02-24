@@ -318,7 +318,13 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 	}
 
 	if model.initial == "" {
-		panic(fmt.Errorf("initial state not found for model %s", model.Id()))
+		panic(fmt.Errorf("initial state is required for state machine %s", model.Id()))
+	}
+	if model.entry != "" {
+		panic(fmt.Errorf("entry actions are not allowed on top level state machine %s", model.Id()))
+	}
+	if model.exit != "" {
+		panic(fmt.Errorf("exit actions are not allowed on top level state machine %s", model.Id()))
 	}
 	return model
 }
@@ -1455,8 +1461,9 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 		defer end()
 	}
 	done := make(chan struct{})
-	sm.processing.Lock()
 	go func() {
+		sm.processing.Lock()
+
 		var ok bool
 		for sm.state != nil {
 			select {
@@ -1471,12 +1478,12 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
+		if all, ok := sm.Value(Keys.All).(*sync.Map); ok {
+			all.Delete(sm.id)
+		}
 		close(done)
 		sm.processing.Unlock()
 	}()
-	if all, ok := sm.Value(Keys.All).(*sync.Map); ok {
-		all.Delete(sm.id)
-	}
 	return done
 }
 
