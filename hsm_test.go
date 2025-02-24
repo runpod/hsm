@@ -75,6 +75,8 @@ func TestHSM(t *testing.T) {
 	ctx := context.Background()
 	model := hsm.Define(
 		"TestHSM",
+		hsm.Entry(mockAction("TestHSM.entry", false)),
+		hsm.Exit(mockAction("TestHSM.exit", false)),
 		hsm.State("s",
 			hsm.Entry(mockAction("s.entry", false)),
 			hsm.Activity(mockAction("s.activity", true)),
@@ -198,7 +200,7 @@ func TestHSM(t *testing.T) {
 		t.Fatal("Initial state is not /s/s2/s21/s211", "state", sm.State())
 	}
 	if !trace.matches(Trace{
-		sync: []string{"initial.effect", "s.entry", "s2.entry", "s2.initial.effect", "s21.entry", "s211.entry"},
+		sync: []string{"TestHSM.entry", "initial.effect", "s.entry", "s2.entry", "s2.initial.effect", "s21.entry", "s211.entry"},
 	}) {
 		t.Fatal("Trace is not correct", "trace", trace)
 	}
@@ -299,7 +301,7 @@ func TestHSM(t *testing.T) {
 		Name: "E",
 		Done: make(chan struct{}),
 	})
-	if sm.State() != "/s/s1/s11" {
+	if !hsm.Match(sm.State(), "/s/s1/s11") {
 		t.Fatal("state is not correct", "state", sm.State())
 	}
 	if !trace.matches(Trace{
@@ -415,6 +417,11 @@ func TestHSM(t *testing.T) {
 		sync: []string{"s3.exit", "s.exit", "X.transition.effect"},
 	}) {
 		t.Fatal("transition actions are not correct", "trace", trace)
+	}
+	select {
+	case <-sm.Done():
+	default:
+		t.Fatal("sm is not done after entering top level final state")
 	}
 	trace.reset()
 	<-sm.Stop(ctx)
