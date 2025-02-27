@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -214,6 +215,9 @@ type constraint[T Context] struct {
 type Event = elements.Event
 
 var InitialEvent = Event{}
+var ErrorEvent = Event{
+	Kind: kind.ErrorEvent,
+}
 
 type DecodedEvent[T any] struct {
 	Event
@@ -1618,7 +1622,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event Event
 	}
 	switch element.Kind() {
 	case kind.Concurrent:
-		ctx := sm.activate(ctx, element)
+		ctx := sm.activate(sm.subcontext, element)
 		go func(ctx *active, end func(...any)) {
 			if end != nil {
 				defer end()
@@ -1738,6 +1742,15 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event Eve
 }
 
 func (sm *hsm[T]) process(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Default().Error("panic in state machine",
+				"error", r,
+				"stacktrace", string(debug.Stack()),
+				"state", sm.state.QualifiedName())
+			go sm.Dispatch(ctx, ErrorEvent)
+		}
+	}()
 	if sm == nil {
 		return
 	}

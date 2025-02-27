@@ -117,6 +117,7 @@ var (
 	Event           = Kind(id.Next(), Element)
 	CompletionEvent = Kind(id.Next(), Event)
 	TimeEvent       = Kind(id.Next(), Event)
+	ErrorEvent      = Kind(id.Next(), Event)
 	Pseudostate     = Kind(id.Next(), Vertex)
 	Initial         = Kind(id.Next(), Pseudostate)
 	FinalState      = Kind(id.Next(), State)
