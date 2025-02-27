@@ -1744,10 +1744,14 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event Eve
 func (sm *hsm[T]) process(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
+			state := ""
+			if sm.state != nil {
+				state = sm.state.QualifiedName()
+			}
 			slog.Default().Error("panic in state machine",
 				"error", r,
 				"stacktrace", string(debug.Stack()),
-				"state", sm.state.QualifiedName())
+				"state", state)
 			go sm.Dispatch(ctx, ErrorEvent)
 		}
 	}()
