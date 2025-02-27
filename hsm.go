@@ -1627,6 +1627,16 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event Event
 			if end != nil {
 				defer end()
 			}
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Default().Error("panic in concurrent behavior",
+						"error", r,
+						"activity", element.QualifiedName(),
+						"stacktrace", string(debug.Stack()),
+					)
+					go sm.Dispatch(ctx, ErrorEvent)
+				}
+			}()
 			element.method(ctx, sm.context, event)
 			ctx.channel <- struct{}{}
 		}(ctx, end)
