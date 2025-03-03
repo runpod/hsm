@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"log/slog"
 	"path"
 	"runtime"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1629,12 +1627,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event Event
 			}
 			defer func() {
 				if r := recover(); r != nil {
-					slog.Default().Error("panic in concurrent behavior",
-						"error", r,
-						"activity", element.QualifiedName(),
-						"stacktrace", string(debug.Stack()),
-					)
-					go sm.Dispatch(ctx, ErrorEvent)
+					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
 				}
 			}()
 			element.method(ctx, sm.context, event)
@@ -1722,7 +1715,7 @@ func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) 
 	select {
 	case <-active.channel:
 	case <-time.After(sm.timeouts.terminate):
-		slog.Error("terminate timeout", "behavior", element.QualifiedName())
+		go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("terminate timeout: %s", element.QualifiedName())))
 	}
 
 }
@@ -1754,17 +1747,11 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event Eve
 func (sm *hsm[T]) process(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			state := ""
-			if sm.state != nil {
-				state = sm.state.QualifiedName()
-			}
-			slog.Default().Error("panic in state machine",
-				"error", r,
-				"stacktrace", string(debug.Stack()),
-				"state", state)
-			go sm.Dispatch(ctx, ErrorEvent)
+			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r)))
 		}
+
 	}()
+	defer sm.processing.Unlock()
 	if sm == nil {
 		return
 	}
@@ -1777,6 +1764,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	event, ok := sm.queue.pop()
 	for ok {
 		qualifiedName := sm.state.QualifiedName()
+		isDeferred := false
 		for qualifiedName != "" {
 			source := get[*state](sm.model, qualifiedName)
 			if source == nil {
@@ -1790,16 +1778,19 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				break
 			}
 			if matches := Match(event.Name, source.deferred...); matches {
-				deferred = append(deferred, event)
+				isDeferred = true
 				break
 			}
 			qualifiedName = source.Owner()
 		}
-		done(event.Done)
+		if isDeferred {
+			deferred = append(deferred, event)
+		} else {
+			done(event.Done)
+		}
 		event, ok = sm.queue.pop()
 	}
 	sm.queue.push(deferred...)
-	sm.processing.Unlock()
 }
 
 func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
