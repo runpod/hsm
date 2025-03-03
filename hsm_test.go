@@ -2,6 +2,7 @@ package hsm_test
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"slices"
 	"testing"
@@ -580,7 +581,10 @@ func BenchmarkHSM(b *testing.B) {
 		benchSM.Dispatch(ctx, fooEvent)
 		benchSM.Dispatch(ctx, barEvent)
 	}
+	slog.Info("done", "queue", benchSM.QueueLen())
 	<-benchSM.Stop(ctx)
+	slog.Info("done", "queue", benchSM.QueueLen())
+
 }
 
 func nonHSMLogic() func(event *hsm.Event) bool {

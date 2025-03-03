@@ -245,11 +245,11 @@ type queue struct {
 	events []Event
 }
 
-// func (q *queue) len() int {
-// 	q.mutex.RLock()
-// 	defer q.mutex.RUnlock()
-// 	return len(q.events)
-// }
+func (q *queue) len() int {
+	q.mutex.RLock()
+	defer q.mutex.RUnlock()
+	return len(q.events)
+}
 
 func (q *queue) pop() (Event, bool) {
 	q.mutex.Lock()
@@ -1188,6 +1188,7 @@ type Context interface {
 	State() string
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
 	Dispatch(ctx context.Context, event Event) <-chan struct{}
+	QueueLen() int
 	Stop(ctx context.Context) <-chan struct{}
 	start(Context)
 }
@@ -1791,6 +1792,10 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		event, ok = sm.queue.pop()
 	}
 	sm.queue.push(deferred...)
+}
+
+func (sm *hsm[T]) QueueLen() int {
+	return sm.queue.len()
 }
 
 func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
