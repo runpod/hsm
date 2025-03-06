@@ -1494,6 +1494,7 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
+		sm.terminate(ctx, sm)
 		if all, ok := sm.Value(Keys.All).(*sync.Map); ok {
 			all.Delete(sm.id)
 		}
@@ -1514,7 +1515,7 @@ func (sm *hsm[T]) Context() context.Context {
 	if sm == nil {
 		return nil
 	}
-	return sm.context
+	return sm.subcontext
 }
 
 // Stop gracefully stops a state machine instance.

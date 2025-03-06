@@ -828,5 +828,11 @@ func TestDispatch(t *testing.T) {
 	if sm.State() != "/bar" {
 		t.Fatalf("Expected state to be bar, got: %s", sm.State())
 	}
+	<-sm.Stop(context.Background())
+	select {
+	case <-sm.Done():
+	default:
+		t.Fatalf("Expected state machine to be done")
+	}
 
 }
