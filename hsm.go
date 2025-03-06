@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"log/slog"
 	"path"
 	"runtime"
 	"sort"
@@ -194,14 +195,14 @@ func (transition *transition) Target() string {
 
 /******* Behavior *******/
 
-type behavior[T Context] struct {
+type behavior[T Instance] struct {
 	element
 	method func(ctx context.Context, hsm T, event Event)
 }
 
 /******* Constraint *******/
 
-type constraint[T Context] struct {
+type constraint[T Instance] struct {
 	element
 	expression func(ctx context.Context, hsm T, event Event) bool
 }
@@ -759,7 +760,7 @@ func Target[T interface{ RedefinableElement | string }](nameOrPartialElement T) 
 //	hsm.Effect(func(ctx context.Context, hsm *MyHSM, event Event) {
 //	    log.Printf("Transitioning with event: %s", event.Name)
 //	})
-func Effect[T Context](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
+func Effect[T Instance](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
 	name := ".effect"
 	if len(maybeName) > 0 {
 		name = maybeName[0]
@@ -788,7 +789,7 @@ func Effect[T Context](fn func(ctx context.Context, hsm T, event Event), maybeNa
 //	hsm.Guard(func(ctx context.Context, hsm *MyHSM, event Event) bool {
 //	    return hsm.counter > 10
 //	})
-func Guard[T Context](fn func(ctx context.Context, hsm T, event Event) bool, maybeName ...string) RedefinableElement {
+func Guard[T Instance](fn func(ctx context.Context, hsm T, event Event) bool, maybeName ...string) RedefinableElement {
 	name := ".guard"
 	if len(maybeName) > 0 {
 		name = maybeName[0]
@@ -933,7 +934,7 @@ func Choice[T interface{ RedefinableElement | string }](elementOrName T, partial
 //	hsm.Entry(func(ctx context.Context, hsm *MyHSM, event Event) {
 //	    log.Printf("Entering state with event: %s", event.Name)
 //	})
-func Entry[T Context](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
+func Entry[T Instance](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
 	name := ".entry"
 	if len(maybeName) > 0 {
 		name = maybeName[0]
@@ -969,7 +970,7 @@ func Entry[T Context](fn func(ctx context.Context, hsm T, event Event), maybeNam
 //	        }
 //	    }
 //	})
-func Activity[T Context](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
+func Activity[T Instance](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
 	name := ".activity"
 	if len(maybeName) > 0 {
 		name = maybeName[0]
@@ -999,7 +1000,7 @@ func Activity[T Context](fn func(ctx context.Context, hsm T, event Event), maybe
 //	hsm.Exit(func(ctx context.Context, hsm *MyHSM, event Event) {
 //	    log.Printf("Exiting state with event: %s", event.Name)
 //	})
-func Exit[T Context](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
+func Exit[T Instance](fn func(ctx context.Context, hsm T, event Event), maybeName ...string) RedefinableElement {
 	name := ".exit"
 	if len(maybeName) > 0 {
 		name = maybeName[0]
@@ -1070,7 +1071,7 @@ func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableEle
 //	    hsm.Source("active"),
 //	    hsm.Target("timeout")
 //	)
-func After[T Context](expr func(ctx context.Context, hsm T, event Event) time.Duration, maybeName ...string) RedefinableElement {
+func After[T Instance](expr func(ctx context.Context, hsm T, event Event) time.Duration, maybeName ...string) RedefinableElement {
 	name := ".after"
 	if len(maybeName) > 0 {
 		name = maybeName[0]
@@ -1168,6 +1169,20 @@ func Final(name string) RedefinableElement {
 	}
 }
 
+// Log logs a message at a given level for a given instance.
+//
+// Example:
+//
+//	hsm.State("process",
+//	    hsm.Entry(hsm.Log(slog.LevelInfo, "Entering state process")),
+//	    )
+func Log[T Instance](level slog.Level, msg string, args ...any) func(ctx context.Context, instance T, event Event) {
+	return func(ctx context.Context, instance T, event Event) {
+		args := append([]any{"id", instance.Id(), "name", instance.Name()}, args...)
+		instance.Log(ctx, level, msg, args...)
+	}
+}
+
 func Submachine(name string, partialElements ...RedefinableElement) RedefinableElement {
 	traceback := traceback()
 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
@@ -1179,19 +1194,29 @@ func Submachine(name string, partialElements ...RedefinableElement) RedefinableE
 	}
 }
 
-// Context represents an active state machine instance that can process events and track state.
+type Logger interface {
+	Log(ctx context.Context, level slog.Level, msg string, args ...any)
+}
+
+// Instance represents an active state machine instance that can process events and track state.
 // It provides methods for event dispatch and state management.
-type Context interface {
+type Instance interface {
 	Element
+	Logger
 	subcontext
 	// State returns the current state's qualified name.
 	State() string
+	Context() context.Context
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
 	Dispatch(ctx context.Context, event Event) <-chan struct{}
 	QueueLen() int
 	Stop(ctx context.Context) <-chan struct{}
-	start(Context)
+	Restart(ctx context.Context)
+	start(Instance)
 }
+
+// Deprecated: Use Actor instead. Instance will be removed in a future version.
+// type Instance = Instance
 
 // HSM is the base type that should be embedded in custom state machine types.
 // It provides the core state machine functionality.
@@ -1203,37 +1228,15 @@ type Context interface {
 //	    counter int
 //	}
 type HSM struct {
-	Context
+	Instance
 }
 
-func (hsm *HSM) start(ctx Context) {
-	if hsm == nil || hsm.Context != nil {
+func (hsm *HSM) start(instance Instance) {
+	if hsm == nil || hsm.Instance != nil {
 		return
 	}
-	hsm.Context = ctx
-	ctx.start(hsm)
-}
-
-func (hsm HSM) State() string {
-	if hsm.Context == nil {
-		return ""
-	}
-	return hsm.Context.State()
-}
-
-func (hsm HSM) Stop(ctx context.Context) <-chan struct{} {
-	if hsm.Context == nil {
-		return noevent.Done
-	}
-	return hsm.Context.Stop(ctx)
-}
-
-func (hsm HSM) Dispatch(ctx context.Context, event Event) <-chan struct{} {
-	if hsm.Context == nil {
-		return noevent.Done
-	}
-
-	return hsm.Context.Dispatch(ctx, event)
+	hsm.Instance = instance
+	instance.start(hsm)
 }
 
 type subcontext = context.Context
@@ -1248,7 +1251,7 @@ type timeouts struct {
 	terminate time.Duration
 }
 
-type hsm[T Context] struct {
+type hsm[T Instance] struct {
 	subcontext
 	behavior[T]
 	state      elements.NamedElement
@@ -1260,6 +1263,7 @@ type hsm[T Context] struct {
 	timeouts   timeouts
 	processing sync.Mutex
 	mutex      sync.RWMutex
+	logger     Logger
 }
 
 // Trace is a function type for tracing state machine execution.
@@ -1277,6 +1281,8 @@ type Config struct {
 	TerminateTimeout time.Duration
 	// Name is the name of the state machine.
 	Name string
+	// Logger is a logger for the state machine.
+	Logger Logger
 }
 
 type key[T any] struct{}
@@ -1392,7 +1398,7 @@ func Match(state string, patterns ...string) bool {
 //	    },
 //	    Id: "my-hsm-1",
 //	})
-func Start[T Context](ctx context.Context, sm T, model *Model, config ...Config) T {
+func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config) T {
 	hsm := &hsm[T]{
 		behavior: behavior[T]{
 			element: element{
@@ -1412,6 +1418,7 @@ func Start[T Context](ctx context.Context, sm T, model *Model, config ...Config)
 		hsm.id = config[0].Id
 		hsm.timeouts.terminate = config[0].TerminateTimeout
 		hsm.qualifiedName = config[0].Name
+		hsm.logger = config[0].Logger
 	}
 	if hsm.id == "" {
 		hsm.id = id()
@@ -1423,7 +1430,7 @@ func Start[T Context](ctx context.Context, sm T, model *Model, config ...Config)
 		hsm.timeouts.terminate = time.Millisecond
 	}
 	hsm.method = func(ctx context.Context, _ T, event Event) {
-		hsm.state = hsm.enter(ctx, hsm.state, event, true)
+		hsm.state = hsm.enter(ctx, &hsm.model.state, &event, true)
 		hsm.process(ctx)
 	}
 	sm.start(hsm)
@@ -1442,7 +1449,7 @@ func (sm *hsm[T]) State() string {
 	return sm.state.QualifiedName()
 }
 
-func (sm *hsm[T]) start(active Context) {
+func (sm *hsm[T]) start(active Instance) {
 	all, ok := active.Value(Keys.All).(*sync.Map)
 	if !ok {
 		all = &sync.Map{}
@@ -1450,8 +1457,14 @@ func (sm *hsm[T]) start(active Context) {
 	subcontext := sm.activate(context.WithValue(context.WithValue(sm.subcontext, Keys.All, all), Keys.HSM, sm), sm)
 	sm.subcontext = subcontext
 	all.Store(sm.id, sm)
-	sm.execute(sm.subcontext, &sm.behavior, InitialEvent)
-	subcontext.channel <- struct{}{}
+	sm.execute(sm.subcontext, &sm.behavior, &InitialEvent)
+	// subcontext.channel <- struct{}{}
+}
+
+func (sm *hsm[T]) Restart(ctx context.Context) {
+	<-sm.Stop(ctx)
+	sm.processing.Lock()
+	(*hsm[T])(sm).start(sm)
 }
 
 func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
@@ -1473,7 +1486,7 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			case <-ctx.Done():
 				return
 			default:
-				sm.exit(ctx, sm.state, noevent)
+				sm.exit(ctx, sm.state, &noevent)
 				sm.state, ok = sm.model.namespace[sm.state.Owner()]
 				if ok {
 					continue
@@ -1488,6 +1501,20 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 		sm.processing.Unlock()
 	}()
 	return done
+}
+
+func (sm *hsm[T]) Log(ctx context.Context, level slog.Level, msg string, args ...any) {
+	if sm == nil || sm.logger == nil {
+		return
+	}
+	sm.logger.Log(ctx, level, msg, args...)
+}
+
+func (sm *hsm[T]) Context() context.Context {
+	if sm == nil {
+		return nil
+	}
+	return sm.context
 }
 
 // Stop gracefully stops a state machine instance.
@@ -1522,7 +1549,7 @@ func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *
 	return current
 }
 
-func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, event Event, defaultEntry bool) elements.NamedElement {
+func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, event *Event, defaultEntry bool) elements.NamedElement {
 	if sm == nil {
 		return nil
 	}
@@ -1567,7 +1594,7 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 	return nil
 }
 
-func (sm *hsm[T]) initial(ctx context.Context, state *state, event Event) elements.NamedElement {
+func (sm *hsm[T]) initial(ctx context.Context, state *state, event *Event) elements.NamedElement {
 	if sm == nil || state == nil {
 		return nil
 	}
@@ -1587,7 +1614,7 @@ func (sm *hsm[T]) initial(ctx context.Context, state *state, event Event) elemen
 	return state
 }
 
-func (sm *hsm[T]) exit(ctx context.Context, element elements.NamedElement, event Event) {
+func (sm *hsm[T]) exit(ctx context.Context, element elements.NamedElement, event *Event) {
 	if sm == nil || element == nil {
 		return
 	}
@@ -1609,7 +1636,7 @@ func (sm *hsm[T]) exit(ctx context.Context, element elements.NamedElement, event
 
 }
 
-func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event Event) {
+func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Event) {
 	if sm == nil || element == nil {
 		return
 	}
@@ -1622,7 +1649,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event Event
 	switch element.Kind() {
 	case kind.Concurrent:
 		ctx := sm.activate(sm.subcontext, element)
-		go func(ctx *active, end func(...any)) {
+		go func(ctx *active, end func(...any), event *Event) {
 			if end != nil {
 				defer end()
 			}
@@ -1631,16 +1658,16 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event Event
 					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
 				}
 			}()
-			element.method(ctx, sm.context, event)
+			element.method(ctx, sm.context, *event)
 			ctx.channel <- struct{}{}
-		}(ctx, end)
+		}(ctx, end, event)
 	default:
-		element.method(ctx, sm.context, event)
+		element.method(ctx, sm.context, *event)
 	}
 
 }
 
-func (sm *hsm[T]) evaluate(ctx context.Context, guard *constraint[T], event Event) bool {
+func (sm *hsm[T]) evaluate(ctx context.Context, guard *constraint[T], event *Event) bool {
 	if sm == nil || guard == nil || guard.expression == nil {
 		return true
 	}
@@ -1652,11 +1679,11 @@ func (sm *hsm[T]) evaluate(ctx context.Context, guard *constraint[T], event Even
 	return guard.expression(
 		ctx,
 		sm.context,
-		event,
+		*event,
 	)
 }
 
-func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement, transition *transition, event Event) elements.NamedElement {
+func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement, transition *transition, event *Event) elements.NamedElement {
 	if sm == nil {
 		return nil
 	}
@@ -1721,7 +1748,7 @@ func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) 
 
 }
 
-func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event Event) *transition {
+func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Event) *transition {
 	if sm == nil {
 		return nil
 	}
@@ -1771,8 +1798,8 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			if source == nil {
 				break
 			}
-			if transition := sm.enabled(ctx, source, event); transition != nil {
-				state := sm.transition(ctx, sm.state, transition, event)
+			if transition := sm.enabled(ctx, source, &event); transition != nil {
+				state := sm.transition(ctx, sm.state, transition, &event)
 				sm.mutex.Lock()
 				sm.state = state
 				sm.mutex.Unlock()
@@ -1832,11 +1859,18 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 //	sm := hsm.Start(...)
 //	done := sm.Dispatch(hsm.Event{Name: "start"})
 //	<-done // Wait for event processing to complete
-func Dispatch(ctx context.Context, event Event) <-chan struct{} {
-	if hsm, ok := FromContext(ctx); ok {
-		return hsm.Dispatch(ctx, event)
+func Dispatch[T context.Context](ctx T, event Event) <-chan struct{} {
+	// avoid indirection if we already have an instance
+	switch c := any(ctx).(type) {
+	case Instance:
+		return c.Dispatch(ctx, event)
+	default:
+		if hsm, ok := FromContext(ctx); ok {
+			return hsm.Dispatch(ctx, event)
+		}
+		return done(event.Done)
 	}
-	return done(event.Done)
+
 }
 
 // DispatchAll sends an event to all state machine instances in the current context.
@@ -1854,7 +1888,7 @@ func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
 		return done(event.Done)
 	}
 	all.Range(func(_ any, value any) bool {
-		maybeSM, ok := value.(Context)
+		maybeSM, ok := value.(Instance)
 		if !ok {
 			return true
 		}
@@ -1873,7 +1907,7 @@ func DispatchTo(ctx context.Context, id string, event Event) <-chan struct{} {
 	if !ok {
 		return done(event.Done)
 	}
-	maybeSM, ok := hsm.(Context)
+	maybeSM, ok := hsm.(Instance)
 	if !ok {
 		return done(event.Done)
 	}
@@ -1888,8 +1922,8 @@ func DispatchTo(ctx context.Context, id string, event Event) <-chan struct{} {
 //	if sm, ok := hsm.FromContext(ctx); ok {
 //	    log.Printf("Current state: %s", sm.State())
 //	}
-func FromContext(ctx context.Context) (Context, bool) {
-	hsm, ok := ctx.Value(Keys.HSM).(Context)
+func FromContext(ctx context.Context) (Instance, bool) {
+	hsm, ok := ctx.Value(Keys.HSM).(Instance)
 	if ok {
 		return hsm, true
 	}

@@ -2,9 +2,11 @@ package hsm_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -490,7 +492,13 @@ func TestDispatchTo(t *testing.T) {
 		t.Fatal("state is not correct", "state", sm2.State())
 	}
 }
+
+var bytes []byte
+
 func noBehavior(ctx context.Context, hsm *THSM, event hsm.Event) {
+	if event.Data != nil {
+		copy(bytes, event.Data.([]byte))
+	}
 }
 
 func TestIsAncestor(t *testing.T) {
@@ -649,4 +657,176 @@ func BenchmarkNonHSM(b *testing.B) {
 			b.Fatal("event not handled")
 		}
 	}
+}
+
+func BenchmarkHSMWithLargeData(b *testing.B) {
+	// Create 1MB of data
+
+	ctx := context.Background()
+
+	instance := hsm.Start(ctx, &THSM{}, &benchModel)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		instance.Dispatch(ctx, hsm.Event{
+			Name: "foo",
+		})
+		instance.Dispatch(ctx, hsm.Event{
+			Name: "bar",
+		})
+
+	}
+	<-instance.Stop(ctx)
+}
+
+type TestLogger struct {
+	messages []string
+}
+
+func NewTestLogger() *TestLogger {
+	return &TestLogger{
+		messages: []string{},
+	}
+}
+
+func (l *TestLogger) Log(ctx context.Context, level slog.Level, msg string, args ...any) {
+	// Format message with args
+	formattedMsg := msg
+	if len(args) > 0 {
+		// Simple formatting that's good enough for our test
+		for i := 0; i < len(args)-1; i += 2 {
+			if i+1 < len(args) {
+				formattedMsg += fmt.Sprintf(" %v=%v", args[i], args[i+1])
+			}
+		}
+	}
+	l.messages = append(l.messages, formattedMsg)
+}
+
+func (l *TestLogger) Contains(substring string) bool {
+	for _, msg := range l.messages {
+		if strings.Contains(msg, substring) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *TestLogger) Reset() {
+	l.messages = []string{}
+}
+
+func (l *TestLogger) Messages() []string {
+	return l.messages
+}
+
+func TestLog(t *testing.T) {
+	// Create a test logger to capture log output
+	logger := NewTestLogger()
+
+	// Create a simple HSM model with logging in entry, exit, and effect actions
+	model := hsm.Define(
+		"TestLogHSM",
+		hsm.State("foo",
+			hsm.Entry(hsm.Log[*THSM](slog.LevelInfo, "Entry action for foo state")),
+			hsm.Exit(hsm.Log[*THSM](slog.LevelInfo, "Exit action for foo state")),
+		),
+		hsm.State("bar",
+			hsm.Entry(hsm.Log[*THSM](slog.LevelInfo, "Entry action for bar state")),
+		),
+		hsm.Transition(
+			hsm.Trigger("foo"),
+			hsm.Source("foo"),
+			hsm.Target("bar"),
+			hsm.Effect(hsm.Log[*THSM](slog.LevelInfo, "Effect action for foo->bar transition")),
+		),
+		hsm.Initial(hsm.Target("foo")),
+	)
+
+	// Create a context with the logger
+	ctx := context.Background()
+
+	// Start the state machine
+	sm := hsm.Start(
+		ctx,
+		&THSM{},
+		&model,
+		hsm.Config{
+			Id:     "test-hsm",
+			Name:   "test-hsm",
+			Logger: logger,
+		},
+	)
+
+	// Wait a bit longer for initial state entry
+	time.Sleep(100 * time.Millisecond)
+
+	// Check that we have the entry log for foo state
+	if !logger.Contains("Entry action for foo state ") {
+		t.Fatalf("Expected log output to contain entry action for foo state, got: %v", logger.Messages())
+	}
+
+	// Reset the logger to start fresh
+	logger.Reset()
+
+	done := sm.Dispatch(ctx, hsm.Event{Name: "foo"})
+	<-done // Wait for the event to be processed
+
+	// Add a delay for logs to be processed
+	time.Sleep(100 * time.Millisecond)
+
+	// Check log output for exit, effect, and entry actions
+	if !logger.Contains("Exit action for foo state") {
+		t.Fatalf("Expected log output to contain exit action for foo state, got: %v", logger.Messages())
+	}
+	if !logger.Contains("Effect action for foo->bar transition") {
+		t.Fatalf("Expected log output to contain effect action for transition, got: %v", logger.Messages())
+	}
+	if !logger.Contains("Entry action for bar state") {
+		t.Fatalf("Expected log output to contain entry action for bar state, got: %v", logger.Messages())
+	}
+
+	// Clean up
+	<-sm.Stop(ctx)
+}
+
+func TestRestart(t *testing.T) {
+	model := hsm.Define(
+		"TestRestartHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+		hsm.Transition(hsm.Trigger("foo"), hsm.Source("foo"), hsm.Target("bar")),
+		hsm.State("bar", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+	)
+	sm := hsm.Start(context.Background(), &THSM{}, &model)
+	if sm.State() != "/foo" {
+		t.Fatalf("Expected state to be foo, got: %s", sm.State())
+	}
+	<-sm.Dispatch(context.Background(), hsm.Event{Name: "foo", Done: make(chan struct{})})
+	if sm.State() != "/bar" {
+		t.Fatalf("Expected state to be bar, got: %s", sm.State())
+	}
+	sm.Restart(context.Background())
+	if sm.State() != "/foo" {
+		t.Fatalf("Expected state to be foo, got: %s", sm.State())
+	}
+}
+
+func TestDispatch(t *testing.T) {
+	model := hsm.Define(
+		"TestDispatchHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+		hsm.Transition(hsm.Trigger("foo"), hsm.Source("foo"), hsm.Target("bar")),
+		hsm.State("bar", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+	)
+	sm := hsm.Start(context.Background(), &THSM{}, &model)
+	if sm.State() != "/foo" {
+		t.Fatalf("Expected state to be foo, got: %s", sm.State())
+	}
+	done := hsm.Dispatch(sm.Context(), hsm.Event{Name: "foo", Done: make(chan struct{})})
+	<-done
+	if sm.State() != "/bar" {
+		t.Fatalf("Expected state to be bar, got: %s", sm.State())
+	}
+
 }
