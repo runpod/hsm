@@ -1215,8 +1215,8 @@ type Instance interface {
 	start(Instance)
 }
 
-// Deprecated: Use Actor instead. Instance will be removed in a future version.
-// type Instance = Instance
+// Deprecated: Use Instance instead. Context will be removed in a future version.
+type Context = Instance
 
 // HSM is the base type that should be embedded in custom state machine types.
 // It provides the core state machine functionality.
