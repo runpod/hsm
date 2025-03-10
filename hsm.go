@@ -1808,16 +1808,23 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			}
 			if matches := Match(event.Name, source.deferred...); matches {
 				isDeferred = true
+				deferred = append(deferred, event)
 				break
 			}
 			qualifiedName = source.Owner()
 		}
-		if isDeferred {
-			deferred = append(deferred, event)
-		} else {
-			done(event.Done)
-		}
+		eventDone := event.Done
 		event, ok = sm.queue.pop()
+		if isDeferred {
+			continue
+		}
+		// if the next event is a completion event, attach the current events done channel to it
+		// this is used to signal the completion of a chain of events
+		if kind.IsKind(event.Kind, kind.CompletionEvent) {
+			event.Done = eventDone
+			continue
+		}
+		done(eventDone)
 	}
 	sm.queue.push(deferred...)
 }
