@@ -1818,9 +1818,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		if isDeferred {
 			continue
 		}
-		// if the next event is a completion event, attach the current events done channel to it
-		// this is used to signal the completion of a chain of events
-		if kind.IsKind(event.Kind, kind.CompletionEvent) {
+		if ok && kind.IsKind(event.Kind, kind.CompletionEvent) {
 			event.Done = eventDone
 			continue
 		}

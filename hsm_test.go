@@ -569,6 +569,73 @@ var benchModel = hsm.Define(
 	// hsm.Telemetry(provider.Tracer("github.com/stateforward/go-hsm")),
 )
 
+func TestCompletionEventChannelPassing(t *testing.T) {
+	model := hsm.Define(
+		"T",
+		hsm.Initial(hsm.Target("a")),
+		hsm.State("a", hsm.Transition(hsm.Trigger("b"), hsm.Target("../b"))),
+		hsm.State("b",
+			hsm.Entry(func(ctx context.Context, sm *THSM, event hsm.Event) {
+				sm.Dispatch(ctx, hsm.Event{
+					Name: "e",
+				})
+				sm.Dispatch(ctx, hsm.Event{
+					Name: "c",
+					Kind: hsm.Kinds.CompletionEvent,
+				})
+			}),
+			hsm.Transition(
+				hsm.Trigger("c"),
+				hsm.Source("."),
+				hsm.Target(
+					hsm.Choice(
+						hsm.Transition(
+							hsm.Target("../c"),
+							hsm.Guard(func(ctx context.Context, sm *THSM, event hsm.Event) bool {
+								return true
+							}),
+						),
+						hsm.Transition(
+							hsm.Trigger("d"),
+							hsm.Target("../d"),
+						),
+					),
+				),
+			),
+		),
+		hsm.State("c", hsm.Entry(
+			func(ctx context.Context, sm *THSM, event hsm.Event) {
+				sm.Dispatch(ctx, hsm.Event{
+					Name: "e",
+				})
+				sm.Dispatch(ctx, hsm.Event{
+					Name: "d",
+					Kind: hsm.Kinds.CompletionEvent,
+				})
+			},
+		),
+			hsm.Transition(
+				hsm.Trigger("d"),
+				hsm.Target("../d"),
+			),
+		),
+		hsm.State("d"),
+	)
+	sm := hsm.Start(context.Background(), &THSM{}, &model)
+	if sm.State() != "/a" {
+		t.Fatalf("expected state \"/a\" got \"%s\"", sm.State())
+	}
+	done := sm.Dispatch(context.Background(), hsm.Event{
+		Name: "b",
+		Done: make(chan struct{}),
+	})
+	<-done
+	if sm.State() != "/d" {
+		t.Fatalf("expected state \"/d\" got \"%s\"", sm.State())
+	}
+
+}
+
 // var benchSM = hsm.Start(context.Background(), &THSM{}, &benchModel)
 
 func BenchmarkHSM(b *testing.B) {
