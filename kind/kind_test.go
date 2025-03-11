@@ -23,4 +23,11 @@ func TestKinds(t *testing.T) {
 	if !IsKind(Choice, Vertex) {
 		t.Errorf("Choice should not be a Vertex")
 	}
+	if !IsKind(ErrorEvent, CompletionEvent) {
+		t.Errorf("ErrorEvent should be an Event")
+	}
+	if IsKind(ErrorEvent, Vertex) {
+		t.Errorf("ErrorEvent should not be a Vertex")
+	}
+
 }

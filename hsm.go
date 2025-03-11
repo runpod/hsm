@@ -1181,8 +1181,8 @@ func Final(name string) RedefinableElement {
 //	    )
 func Log[T Instance](level slog.Level, msg string, args ...any) func(ctx context.Context, instance T, event Event) {
 	return func(ctx context.Context, instance T, event Event) {
-		args := append([]any{"id", instance.Id(), "name", instance.Name()}, args...)
-		instance.Log(ctx, level, msg, args...)
+		args := append([]any{"id", instance.Id(), "name", instance.Name(), "state", instance.State(), "event", event}, args...)
+		instance.Log(instance.Context(), level, msg, args...)
 	}
 }
 
@@ -1653,7 +1653,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 	switch element.Kind() {
 	case kind.Concurrent:
 		ctx := sm.activate(sm.subcontext, element)
-		go func(ctx *active, end func(...any), event *Event) {
+		go func(ctx *active, end func(...any), event Event) {
 			if end != nil {
 				defer end()
 			}
@@ -1662,9 +1662,9 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
 				}
 			}()
-			element.method(ctx, sm.context, *event)
+			element.method(ctx, sm.context, event)
 			ctx.channel <- struct{}{}
-		}(ctx, end, event)
+		}(ctx, end, *event)
 	default:
 		element.method(ctx, sm.context, *event)
 	}
