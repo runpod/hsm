@@ -213,8 +213,11 @@ type constraint[T Instance] struct {
 // Events can carry data and have completion tracking through the Done channel.
 type Event = elements.Event
 
-var InitialEvent = Event{}
+var InitialEvent = Event{
+	Name: "hsm_initial",
+}
 var ErrorEvent = Event{
+	Name: "hsm_error",
 	Kind: kind.ErrorEvent,
 }
 
@@ -848,8 +851,8 @@ func Initial[T interface{ string | RedefinableElement }](elementOrName T, partia
 		if transition.guard != "" {
 			traceback(fmt.Errorf("initial \"%s\" cannot have a guard", initial.QualifiedName()))
 		}
-		if transition.events[0].Name != "" {
-			traceback(fmt.Errorf("initial \"%s\" cannot have triggers", initial.QualifiedName()))
+		if transition.events[0].Name != InitialEvent.Name {
+			traceback(fmt.Errorf("initial \"%s\" must not have a trigger \"%s\"", initial.QualifiedName(), InitialEvent.Name))
 		}
 		if !strings.HasPrefix(transition.target, owner.QualifiedName()) {
 			traceback(fmt.Errorf("initial \"%s\" must target a nested state not \"%s\"", initial.QualifiedName(), transition.target))
@@ -1774,9 +1777,13 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 }
 
 func (sm *hsm[T]) process(ctx context.Context) {
+	var eventDone = closedChannel
 	defer func() {
 		if r := recover(); r != nil {
-			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r)))
+			// stack := make([]byte, 4096)
+			// stack = stack[:runtime.Stack(stack, false)]
+			// slog.Default().Error("panic in state machine processing", "func", "hsm.process", "error", r, "stack", string(stack))
+			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r), eventDone))
 		}
 
 	}()
@@ -1792,6 +1799,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
+		eventDone = event.Done
 		qualifiedName := sm.state.QualifiedName()
 		isDeferred := false
 		for qualifiedName != "" {
@@ -1813,7 +1821,6 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			}
 			qualifiedName = source.Owner()
 		}
-		eventDone := event.Done
 		event, ok = sm.queue.pop()
 		if isDeferred {
 			continue
