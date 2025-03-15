@@ -1562,7 +1562,11 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
+
 		sm.terminate(ctx, sm)
+		active := sm.active[sm.QualifiedName()]
+		active.cancel()
+		clear(sm.active)
 		if all, ok := sm.context.Value(Keys.All).(*sync.Map); ok {
 			all.Delete(sm.id)
 		}
