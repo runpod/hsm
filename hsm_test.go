@@ -24,7 +24,7 @@ func (t *Trace) reset() {
 	t.async = []string{}
 }
 
-func tracer(ctx context.Context, step string, data ...any) (context.Context, func(...any)) {
+func tracer(ctx context.Context, sm hsm.Instance, step string, data ...any) (context.Context, func(...any)) {
 	return ctx, func(data ...any) {}
 }
 
@@ -160,7 +160,6 @@ func TestHSM(t *testing.T) {
 			func(ctx context.Context, hsm *THSM, event hsm.Event) time.Duration {
 				return time.Second * 2
 			},
-			"s211.after",
 		), hsm.Source("/s/s2/s21/s211"), hsm.Target("/s/s1/s11"), hsm.Effect(mockAction("s211.after.transition.effect", false)), hsm.Guard(
 			func(ctx context.Context, hsm *THSM, event hsm.Event) bool {
 				triggered := !afterTriggered
@@ -420,7 +419,7 @@ func TestHSM(t *testing.T) {
 		t.Fatal("transition actions are not correct", "trace", trace)
 	}
 	select {
-	case <-sm.Done():
+	case <-sm.Context().Done():
 	default:
 		t.Fatal("sm is not done after entering top level final state")
 	}
@@ -453,11 +452,11 @@ func TestHSMDispatchAll(t *testing.T) {
 	)
 	ctx := context.Background()
 	sm1 := hsm.Start(ctx, &THSM{}, &model)
-	sm2 := hsm.Start(sm1, &THSM{}, &model)
+	sm2 := hsm.Start(sm1.Context(), &THSM{}, &model)
 	if sm2.State() != "/foo" {
 		t.Fatal("state is not correct", "state", sm2.State())
 	}
-	hsm.DispatchAll(sm2, hsm.Event{
+	hsm.DispatchAll(sm2.Context(), hsm.Event{
 		Name: "foo",
 	})
 	time.Sleep(time.Second)
@@ -469,6 +468,35 @@ func TestHSMDispatchAll(t *testing.T) {
 	}
 }
 
+func TestEvery(t *testing.T) {
+	timestamps := []time.Time{}
+	model := hsm.Define(
+		"TestHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo"),
+		hsm.Transition(
+			hsm.Every(func(ctx context.Context, thsm *THSM, event hsm.Event) time.Duration {
+				return time.Millisecond * 500
+			}),
+			hsm.Effect(func(ctx context.Context, thsm *THSM, event hsm.Event) {
+				timestamps = append(timestamps, time.Now())
+			}),
+		),
+	)
+	_ = hsm.Start(context.Background(), &THSM{}, &model)
+	for i := 0; i < 10; i++ {
+		time.Sleep(time.Millisecond * 550)
+		if len(timestamps) > i+1 {
+			t.Fatalf("timestamps are not in order expected %v got %v", timestamps[i], timestamps[i+1])
+		}
+	}
+	for i := 1; i < len(timestamps)-1; i++ {
+		delta := timestamps[i+1].Sub(timestamps[i])
+		if delta < time.Millisecond*500 || delta > time.Millisecond*551 {
+			t.Fatalf("delta is not correct expected %v got %v", time.Millisecond*500, delta)
+		}
+	}
+}
 func TestDispatchTo(t *testing.T) {
 	model := hsm.Define(
 		"TestHSM",
@@ -480,11 +508,11 @@ func TestDispatchTo(t *testing.T) {
 	)
 	ctx := context.Background()
 	sm1 := hsm.Start(ctx, &THSM{}, &model, hsm.Config{Id: "sm1"})
-	sm2 := hsm.Start(sm1, &THSM{}, &model, hsm.Config{Id: "sm2"})
+	sm2 := hsm.Start(sm1.Context(), &THSM{}, &model, hsm.Config{Id: "sm2"})
 	if sm2.State() != "/foo" {
 		t.Fatal("state is not correct", "state", sm2.State())
 	}
-	<-hsm.DispatchTo(sm2, "sm2", hsm.Event{
+	<-hsm.DispatchTo(sm2.Context(), "sm2", hsm.Event{
 		Name: "foo",
 		Done: make(chan struct{}),
 	})
@@ -897,7 +925,7 @@ func TestDispatch(t *testing.T) {
 	}
 	<-sm.Stop(context.Background())
 	select {
-	case <-sm.Done():
+	case <-sm.Context().Done():
 	default:
 		t.Fatalf("Expected state machine to be done")
 	}

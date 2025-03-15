@@ -167,6 +167,90 @@ model := hsm.Define(
 )
 ```
 
+### Logging Support
+
+The state machine supports structured logging through a Logger interface:
+
+```go
+// Define a logger implementation
+type MyLogger struct {}
+
+func (l *MyLogger) Log(ctx context.Context, level slog.Level, msg string, args ...any) {
+    // Implement logging logic
+}
+
+// Use the logger in state machine configuration
+sm := hsm.Start(ctx, &MyHSM{}, &model, hsm.Config{
+    Logger: &MyLogger{},
+    Id:    "my-hsm",
+    Name:  "MyHSM",
+})
+
+// Use logging in state actions
+hsm.State("active",
+    hsm.Entry(hsm.Log[*MyHSM](slog.LevelInfo, "Entering active state")),
+    hsm.Exit(hsm.Log[*MyHSM](slog.LevelInfo, "Exiting active state"))
+)
+```
+
+### State Machine Lifecycle Management
+
+Additional lifecycle management features:
+
+```go
+// Restart a state machine
+sm.Restart(context.Background())  // Returns to initial state
+
+// Stop a state machine
+done := sm.Stop(context.Background())
+<-done  // Wait for completion
+
+// Get current queue length
+queueLen := sm.QueueLen()
+
+// Get state machine context
+ctx := sm.Context()
+```
+
+### Event Dispatch Methods
+
+Multiple ways to dispatch events:
+
+```go
+// Direct dispatch to a specific state machine
+done := sm.Dispatch(ctx, hsm.Event{Name: "myEvent"})
+<-done  // Wait for completion
+
+// Dispatch through context
+done = hsm.Dispatch(ctx, hsm.Event{Name: "myEvent"})
+<-done
+
+// Broadcast to all state machines
+done = hsm.DispatchAll(ctx, hsm.Event{Name: "globalEvent"})
+<-done
+
+// Dispatch to specific state machine by ID
+done = hsm.DispatchTo(ctx, "machine-1", hsm.Event{Name: "targetedEvent"})
+<-done
+```
+
+### Pattern Matching
+
+Support for wildcard pattern matching in state and event names:
+
+```go
+// Match state patterns
+matched := hsm.Match("/state/substate", "/state/*")  // true
+matched = hsm.Match("/foo/bar/baz", "/foo/bar")     // false
+
+// Use wildcards in event triggers
+hsm.Transition(
+    hsm.Trigger("*.event.*"),  // Matches any event with middle segment "event"
+    hsm.Source("active"),
+    hsm.Target("next")
+)
+```
+
 ### Event Deferral
 
 States can defer events to be processed later:
@@ -302,7 +386,7 @@ model := hsm.Model(
 
 ### Time-Based Transitions
 
-Create transitions that occur after a time delay:
+Create transitions that occur after a time delay or at regular intervals:
 
 ```go
 type TimerHSM struct {
@@ -310,6 +394,7 @@ type TimerHSM struct {
     timeout time.Duration
 }
 
+// One-time delayed transition
 hsm.Transition(
     hsm.After(func(ctx context.Context, hsm *TimerHSM) time.Duration {
         return hsm.timeout
@@ -317,7 +402,62 @@ hsm.Transition(
     hsm.Source("active"),
     hsm.Target("timeout")
 )
+
+// Recurring transition every interval
+hsm.Transition(
+    hsm.Every(func(ctx context.Context, hsm *TimerHSM) time.Duration {
+        return time.Second * 5  // Triggers every 5 seconds
+    }),
+    hsm.Source("active"),
+    hsm.Effect(func(ctx context.Context, hsm *TimerHSM, event hsm.Event) {
+        log.Println("Recurring action")
+    })
+)
 ```
+
+### Context Usage in Activities
+
+Activities receive a context that is cancelled when the state is exited. For operations that need to live beyond the state's lifetime, use the state machine's context instead:
+
+```go
+type MyHSM struct {
+    hsm.HSM
+    data chan string
+}
+
+hsm.State("processing",
+    // Activity bound to state lifetime
+    hsm.Activity(func(ctx context.Context, hsm *MyHSM, event hsm.Event) {
+        // This goroutine will be cancelled when leaving the state
+        for {
+            select {
+            case <-ctx.Done():
+                return
+            case data := <-hsm.data:
+                log.Println("Processed:", data)
+            }
+        }
+    }),
+
+    // Activity using state machine context
+    hsm.Activity(func(stateCtx context.Context, hsm *MyHSM, event hsm.Event) {
+        // Use sm.Context() for operations that should continue across state changes
+        smCtx := hsm.Context()
+        go func() {
+            for {
+                select {
+                case <-smCtx.Done():
+                    return
+                case data := <-hsm.data:
+                    log.Println("Long-running process:", data)
+                }
+            }
+        }()
+    })
+)
+```
+
+Note: Be careful when using the state machine's context in activities, as these operations will continue running until the state machine is stopped, regardless of state changes.
 
 ### Event Completion Tracking
 

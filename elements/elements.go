@@ -14,9 +14,13 @@ type NamedElement interface {
 	Name() string
 }
 
-type Model interface {
+type Namespace interface {
 	NamedElement
-	Namespace() map[string]NamedElement
+	Members() map[string]NamedElement
+}
+
+type Model interface {
+	Namespace
 }
 
 type Transition interface {
@@ -24,7 +28,7 @@ type Transition interface {
 	Source() string
 	Target() string
 	Guard() string
-	Effect() string
+	Effect() []string
 	Events() []Event
 }
 
@@ -35,9 +39,9 @@ type Vertex interface {
 
 type State interface {
 	Vertex
-	Entry() string
+	Entry() []string
 	Activities() []string
-	Exit() string
+	Exit() []string
 }
 
 type Event struct {
