@@ -1546,6 +1546,12 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 	}
 	done := make(chan struct{})
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				sm.Log(ctx, slog.LevelError, "panic in stop: %s", r)
+				close(done)
+			}
+		}()
 		sm.processing.Lock()
 
 		var ok bool
@@ -1563,9 +1569,9 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			break
 		}
 
-		sm.terminate(ctx, sm)
-		active := sm.active[sm.QualifiedName()]
-		active.cancel()
+		if active, ok := sm.active[sm.QualifiedName()]; ok {
+			active.cancel()
+		}
 		clear(sm.active)
 		if all, ok := sm.context.Value(Keys.All).(*sync.Map); ok {
 			all.Delete(sm.id)
