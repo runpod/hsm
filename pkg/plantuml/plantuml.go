@@ -39,13 +39,13 @@ func generateState(builder *strings.Builder, depth int, state elements.NamedElem
 			}
 		}
 	}
-	initial, ok := model.Namespace()[path.Join(state.QualifiedName(), ".initial")]
+	initial, ok := model.Members()[path.Join(state.QualifiedName(), ".initial")]
 	if ok {
 		if !composite {
 			composite = true
 			fmt.Fprintf(builder, "%sstate %s{\n", indent, id)
 		}
-		if transition, ok := model.Namespace()[initial.(elements.Vertex).Transitions()[0]]; ok {
+		if transition, ok := model.Members()[initial.(elements.Vertex).Transitions()[0]]; ok {
 			generateTransition(builder, depth+1, transition.(elements.Transition), allElements, visited)
 		}
 	}
@@ -60,7 +60,7 @@ func generateState(builder *strings.Builder, depth int, state elements.NamedElem
 	}
 	if kind.IsKind(state.Kind(), kind.State) {
 		state := state.(elements.State)
-		if entry := state.Entry(); entry != "" {
+		for _, entry := range state.Entry() {
 			fmt.Fprintf(builder, "%sstate %s: entry / %s\n", indent, id, idFromQualifiedName(path.Base(entry)))
 		}
 		if len(state.Activities()) > 0 {
@@ -70,7 +70,7 @@ func generateState(builder *strings.Builder, depth int, state elements.NamedElem
 			}
 			fmt.Fprintf(builder, "%sstate %s: activities %s\n", indent, id, strings.Join(activities, ", "))
 		}
-		if exit := state.Exit(); exit != "" {
+		for _, exit := range state.Exit() {
 			fmt.Fprintf(builder, "%sstate %s: exit / %s\n", indent, id, idFromQualifiedName(path.Base(exit)))
 		}
 	}
@@ -100,7 +100,7 @@ func generateTransition(builder *strings.Builder, depth int, transition elements
 	if guard := transition.Guard(); guard != "" {
 		label = fmt.Sprintf("%s [%s]", label, idFromQualifiedName(path.Base(guard)))
 	}
-	if effect := transition.Effect(); effect != "" {
+	for _, effect := range transition.Effect() {
 		label = fmt.Sprintf("%s / %s", label, idFromQualifiedName(path.Base(effect)))
 	}
 	if label != "" {
@@ -126,8 +126,8 @@ func generateElements(builder *strings.Builder, depth int, model elements.Model,
 			generateState(builder, depth+1, element, model, allElements, visited)
 		}
 	}
-	if initial, ok := model.Namespace()[path.Join(model.QualifiedName(), ".initial")]; ok {
-		if transition, ok := model.Namespace()[initial.(elements.Vertex).Transitions()[0]]; ok {
+	if initial, ok := model.Members()[path.Join(model.QualifiedName(), ".initial")]; ok {
+		if transition, ok := model.Members()[initial.(elements.Vertex).Transitions()[0]]; ok {
 			generateTransition(builder, depth, transition.(elements.Transition), allElements, visited)
 		}
 	}
@@ -145,7 +145,7 @@ func generateElements(builder *strings.Builder, depth int, model elements.Model,
 func Generate(writer io.Writer, model elements.Model) error {
 	var builder strings.Builder
 	elements := []elements.NamedElement{}
-	for _, element := range model.Namespace() {
+	for _, element := range model.Members() {
 		elements = append(elements, element)
 	}
 	// Sort elements hierarchically like a directory structure
