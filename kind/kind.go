@@ -92,12 +92,14 @@ type kinds struct {
 	Self            uint64
 	Event           uint64
 	CompletionEvent uint64
-	TimeEvent       uint64
-	Pseudostate     uint64
-	Initial         uint64
-	FinalState      uint64
-	Choice          uint64
-	Custom          uint64
+	ErrorEvent      uint64
+
+	TimeEvent   uint64
+	Pseudostate uint64
+	Initial     uint64
+	FinalState  uint64
+	Choice      uint64
+	Custom      uint64
 }
 
 var (
@@ -119,8 +121,8 @@ var (
 	Self            = Kind(id.Next(), Transition)
 	Event           = Kind(id.Next(), Element)
 	CompletionEvent = Kind(id.Next(), Event)
-	TimeEvent       = Kind(id.Next(), Event)
 	ErrorEvent      = Kind(id.Next(), CompletionEvent)
+	TimeEvent       = Kind(id.Next(), Event)
 	Pseudostate     = Kind(id.Next(), Vertex)
 	Initial         = Kind(id.Next(), Pseudostate)
 	FinalState      = Kind(id.Next(), State)
@@ -147,6 +149,7 @@ var Kinds = sync.OnceValue(func() (kinds kinds) {
 	kinds.Event = Event
 	kinds.TimeEvent = TimeEvent
 	kinds.CompletionEvent = CompletionEvent
+	kinds.ErrorEvent = ErrorEvent
 	kinds.Pseudostate = Pseudostate
 	kinds.Initial = Initial
 	kinds.FinalState = FinalState
