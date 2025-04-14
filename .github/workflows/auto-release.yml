@@ -5,6 +5,7 @@ on:
     branches:
       - main
     paths:
+      - "version.go"
       - "go.mod"
       - "go.sum"
 
@@ -24,13 +25,13 @@ jobs:
       - name: Get package version
         id: get_version
         run: |
-          VERSION=$(grep '^module' go.mod | awk '{print $2}' | sed 's/.*@//')
+          VERSION=$(grep 'const Version = ' version.go | cut -d'"' -f2)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Check if tag exists
         id: check_tag
         run: |
-          if git tag -l "v${{ steps.get_version.outputs.version }}" | grep -q "v${{ steps.get_version.outputs.version }}"; then
+          if git tag -l "${{ steps.get_version.outputs.version }}" | grep -q "${{ steps.get_version.outputs.version }}"; then
             echo "exists=true" >> $GITHUB_OUTPUT
           else
             echo "exists=false" >> $GITHUB_OUTPUT
@@ -43,12 +44,12 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git tag -a "v${{ steps.get_version.outputs.version }}" -m "Release v${{ steps.get_version.outputs.version }}"
-          git push origin "v${{ steps.get_version.outputs.version }}"
+          git tag -a "${{ steps.get_version.outputs.version }}" -m "Release ${{ steps.get_version.outputs.version }}"
+          git push origin "${{ steps.get_version.outputs.version }}"
 
           # Create a GitHub release
-          gh release create "v${{ steps.get_version.outputs.version }}" \
-            --title "v${{ steps.get_version.outputs.version }}" \
-            --notes "Release v${{ steps.get_version.outputs.version }}" \
+          gh release create "${{ steps.get_version.outputs.version }}" \
+            --title "${{ steps.get_version.outputs.version }}" \
+            --notes "Release ${{ steps.get_version.outputs.version }}" \
             --draft=false \
             --prerelease=false
