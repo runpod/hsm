@@ -509,15 +509,21 @@ func TestDispatchTo(t *testing.T) {
 	ctx := context.Background()
 	sm1 := hsm.Start(ctx, &THSM{}, &model, hsm.Config{Id: "sm1"})
 	sm2 := hsm.Start(sm1.Context(), &THSM{}, &model, hsm.Config{Id: "sm2"})
+	if sm1.State() != "/foo" {
+		t.Fatal("state is not correct", "state", sm1.State())
+	}
 	if sm2.State() != "/foo" {
 		t.Fatal("state is not correct", "state", sm2.State())
 	}
-	<-hsm.DispatchTo(sm2.Context(), "sm2", hsm.Event{
+	<-hsm.DispatchTo(sm2.Context(), hsm.Event{
 		Name: "foo",
 		Done: make(chan struct{}),
-	})
+	}, "sm*")
 	if sm2.State() != "/bar" {
 		t.Fatal("state is not correct", "state", sm2.State())
+	}
+	if sm1.State() != "/bar" {
+		t.Fatal("state is not correct", "state", sm1.State())
 	}
 }
 

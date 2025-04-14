@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/runpod/aiapi/pkg/priorityflashboot/syncmap"
 	"github.com/runpod/hsm/elements"
 	"github.com/runpod/hsm/kind"
 )
@@ -1357,10 +1358,10 @@ type Config struct {
 type key[T any] struct{}
 
 var Keys = struct {
-	All key[*sync.Map]
+	All key[*syncmap.SyncMap[string, Instance]]
 	HSM key[HSM]
 }{
-	All: key[*sync.Map]{},
+	All: key[*syncmap.SyncMap[string, Instance]]{},
 	HSM: key[HSM]{},
 }
 
@@ -1519,9 +1520,9 @@ func (sm *hsm[T]) State() string {
 }
 
 func (sm *hsm[T]) start(active Instance) {
-	all, ok := sm.context.Value(Keys.All).(*sync.Map)
+	all, ok := sm.context.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
-		all = &sync.Map{}
+		all = &syncmap.SyncMap[string, Instance]{}
 	}
 	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.All, all), Keys.HSM, sm), sm)
 	sm.context = ctx
@@ -1976,20 +1977,39 @@ func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
 	return event.Done
 }
 
-func DispatchTo(ctx context.Context, id string, event Event) <-chan struct{} {
-	all, ok := ctx.Value(Keys.All).(*sync.Map)
+func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan struct{} {
+	all, ok := ctx.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
 		return done(event.Done)
 	}
-	hsm, ok := all.Load(id)
-	if !ok {
-		return done(event.Done)
+	var signal chan struct{}
+	if event.Done != nil {
+		signal = make(chan struct{})
 	}
-	maybeSM, ok := hsm.(Instance)
-	if !ok {
-		return done(event.Done)
-	}
-	return maybeSM.Dispatch(ctx, event)
+	go func(signal chan struct{}) {
+		defer done(signal)
+		channels := []chan struct{}{}
+		all.Range(func(id string, sm Instance) bool {
+			if matches := Match(id, maybeIds...); matches {
+				if signal != nil {
+					ch := make(chan struct{})
+					channels = append(channels, ch)
+					sm.Dispatch(ctx, event.WithDone(ch))
+				} else {
+					sm.Dispatch(ctx, event)
+				}
+			}
+			return true
+		})
+		for _, ch := range channels {
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}(signal)
+	return signal
 }
 
 // FromContext retrieves a state machine instance from a context.
@@ -2019,15 +2039,7 @@ func done(channel chan struct{}) <-chan struct{} {
 			return channel
 		}
 	default:
-		// Channel is open, try to send a value
-		select {
-		case channel <- struct{}{}:
-			return channel
-			// Successfully sent completion signal
-		default:
-			// Channel already has a value
-		}
+		close(channel)
 	}
-	close(channel)
 	return channel
 }
