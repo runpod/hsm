@@ -240,14 +240,14 @@ func DecodeEvent[T any](event Event) (DecodedEvent[T], bool) {
 	}, ok
 }
 
-var closedChannel = func() chan struct{} {
+var doneSignal = func() chan struct{} {
 	done := make(chan struct{})
 	close(done)
 	return done
 }()
 
 var noevent = Event{
-	Done: closedChannel,
+	Done: doneSignal,
 }
 
 type queue struct {
@@ -1283,9 +1283,10 @@ type Instance interface {
 	State() string
 	Context() context.Context
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
-	Dispatch(ctx context.Context, event Event) <-chan struct{}
+	Dispatch(ctx context.Context, event Event) Signal
+	Wait() Signal
 	QueueLen() int
-	Stop(ctx context.Context) <-chan struct{}
+	Stop(ctx context.Context) Signal
 	Restart(ctx context.Context)
 	start(Instance)
 }
@@ -1326,6 +1327,35 @@ type timeouts struct {
 	terminate time.Duration
 }
 
+type Signal = elements.Signal
+
+type mutex struct {
+	internal sync.Mutex
+	signal   Signal
+}
+
+func (mutex *mutex) Lock() {
+	mutex.internal.Lock()
+	mutex.signal = make(Signal)
+}
+
+func (mutex *mutex) Unlock() {
+	mutex.internal.Unlock()
+	close(mutex.signal)
+}
+
+func (mutex *mutex) Wait() Signal {
+	return mutex.signal
+}
+
+func (mutex *mutex) TryLock() bool {
+	if mutex.internal.TryLock() {
+		mutex.signal = make(Signal)
+		return true
+	}
+	return false
+}
+
 type hsm[T Instance] struct {
 	behavior[T]
 	context    context.Context
@@ -1336,7 +1366,7 @@ type hsm[T Instance] struct {
 	instance   T
 	trace      Trace
 	timeouts   timeouts
-	processing sync.Mutex
+	processing mutex
 	mutex      sync.RWMutex
 	logger     Logger
 }
@@ -1541,9 +1571,9 @@ func (sm *hsm[T]) Restart(ctx context.Context) {
 	(*hsm[T])(sm).start(sm)
 }
 
-func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
+func (sm *hsm[T]) Stop(ctx context.Context) Signal {
 	if sm == nil {
-		return closedChannel
+		return doneSignal
 	}
 	if sm.trace != nil {
 		var end func(...any)
@@ -1600,6 +1630,13 @@ func (sm *hsm[T]) Context() context.Context {
 		return nil
 	}
 	return sm.context
+}
+
+func (sm *hsm[T]) Wait() Signal {
+	if sm == nil {
+		return doneSignal
+	}
+	return sm.processing.Wait()
 }
 
 // Stop gracefully stops a state machine instance.
@@ -1851,14 +1888,13 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 }
 
 func (sm *hsm[T]) process(ctx context.Context) {
-	var eventDone = closedChannel
+	var eventDone = doneSignal
 	defer func() {
 		if r := recover(); r != nil {
 			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r), eventDone))
 		}
-
+		sm.processing.Unlock()
 	}()
-	defer sm.processing.Unlock()
 	if sm == nil {
 		return
 	}
@@ -1896,10 +1932,10 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		if isDeferred {
 			continue
 		}
-		if ok && kind.IsKind(event.Kind, kind.CompletionEvent) {
-			event.Done = eventDone
-			continue
-		}
+		// if ok && kind.IsKind(event.Kind, kind.CompletionEvent) {
+		// 	event.Done = eventDone
+		// 	continue
+		// }
 		done(eventDone)
 	}
 	sm.queue.push(deferred...)
@@ -1909,7 +1945,7 @@ func (sm *hsm[T]) QueueLen() int {
 	return sm.queue.len()
 }
 
-func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
+func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) Signal {
 	if sm == nil {
 		return done(event.Done)
 	}
@@ -1920,7 +1956,7 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 		event.Kind = kind.Event
 	}
 	if event.Done == nil {
-		event.Done = closedChannel
+		event.Done = doneSignal
 	}
 	if sm.trace != nil {
 		var end func(...any)
@@ -1930,9 +1966,9 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	sm.queue.push(event)
 	if sm.processing.TryLock() {
 		go sm.process(ctx)
-		return event.Done
+		return sm.processing.Wait()
 	}
-	return event.Done
+	return sm.processing.Wait()
 }
 
 // Dispatch sends an event to a specific state machine instance.
@@ -1943,7 +1979,7 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 //	sm := hsm.Start(...)
 //	done := sm.Dispatch(hsm.Event{Name: "start"})
 //	<-done // Wait for event processing to complete
-func Dispatch[T context.Context](ctx T, event Event) <-chan struct{} {
+func Dispatch[T context.Context](ctx T, event Event) Signal {
 	// avoid indirection if we already have an instance
 	switch c := any(ctx).(type) {
 	case Instance:
@@ -1966,47 +2002,34 @@ func Dispatch[T context.Context](ctx T, event Event) <-chan struct{} {
 //	sm2 := hsm.Start(...)
 //	done := hsm.DispatchAll(context.Background(), hsm.Event{Name: "globalEvent"})
 //	<-done // Wait for all instances to process the event
-func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
-	all, ok := ctx.Value(Keys.All).(*sync.Map)
-	if !ok {
-		return done(event.Done)
-	}
-	all.Range(func(_ any, value any) bool {
-		maybeSM, ok := value.(Instance)
-		if !ok {
-			return true
-		}
-		maybeSM.Dispatch(ctx, event)
-		return true
-	})
-	return event.Done
+func DispatchAll(ctx context.Context, event Event) Signal {
+	return DispatchTo(ctx, event)
 }
 
-func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan struct{} {
+func DispatchTo(ctx context.Context, event Event, maybeIds ...string) Signal {
 	all, ok := ctx.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
-		return done(event.Done)
+		return noevent.Done
 	}
-	var signal chan struct{}
-	if event.Done != nil {
-		signal = make(chan struct{})
+	signal := make(Signal)
+	if !ok {
+		close(signal)
+		return signal
 	}
-	go func(signal chan struct{}) {
+	go func(signal Signal) {
 		defer done(signal)
-		channels := []chan struct{}{}
+		signals := []Signal{}
 		all.Range(func(id string, sm Instance) bool {
-			if matches := Match(id, maybeIds...); matches {
+			if len(maybeIds) == 0 || Match(id, maybeIds...) {
 				if signal != nil {
-					ch := make(chan struct{})
-					channels = append(channels, ch)
-					sm.Dispatch(ctx, event.WithDone(ch))
+					signals = append(signals, sm.Dispatch(ctx, event))
 				} else {
 					sm.Dispatch(ctx, event)
 				}
 			}
 			return true
 		})
-		for _, ch := range channels {
+		for _, ch := range signals {
 			select {
 			case <-ch:
 			case <-ctx.Done():
@@ -2033,7 +2056,7 @@ func FromContext(ctx context.Context) (Instance, bool) {
 	return nil, false
 }
 
-func done(channel chan struct{}) <-chan struct{} {
+func done(channel chan struct{}) Signal {
 	if channel == nil {
 		return noevent.Done
 	}

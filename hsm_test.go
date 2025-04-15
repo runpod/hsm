@@ -369,12 +369,11 @@ func TestHSM(t *testing.T) {
 		t.Fatal("transition actions are not correct", "trace", trace)
 	}
 	trace.reset()
-	ch := sm.Dispatch(ctx, hsm.Event{
+	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "J",
 		Done: make(chan struct{}),
 	})
-	<-ch
-	<-ch
+	<-sm.Wait()
 	if sm.State() != "/s/s3" {
 		t.Fatal("state is not correct after J expected /s/s3 got", "state", sm.State())
 	}
