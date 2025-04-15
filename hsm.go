@@ -855,7 +855,7 @@ func Initial[T interface{ string | RedefinableElement }](elementOrName T, partia
 		}
 		model.members[initial.QualifiedName()] = initial
 		stack = append(stack, initial)
-		transition := (Transition(Source(initial.QualifiedName()), append(partialElements, Trigger(InitialEvent))...)(model, stack)).(*transition)
+		transition := (Transition(Source(initial.QualifiedName()), append(partialElements, On(InitialEvent))...)(model, stack)).(*transition)
 		// validation logic
 		if transition.guard != "" {
 			traceback(fmt.Errorf("initial \"%s\" cannot have a guard", initial.QualifiedName()))
@@ -1029,17 +1029,17 @@ func Exit[T Instance](funcs ...func(ctx context.Context, hsm T, event Event)) Re
 	}
 }
 
-// Trigger defines the events that can cause a transition.
+// On defines the events that can cause a transition.
 // Multiple events can be specified for a single transition.
 //
 // Example:
 //
 //	hsm.Transition(
-//	    hsm.Trigger("start", "resume"),
+//	    hsm.On("start", "resume"),
 //	    hsm.Source("idle"),
 //	    hsm.Target("running")
 //	)
-func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
+func On[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
 	traceback := traceback()
 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
 		owner := find(stack, kind.Transition)
@@ -1064,6 +1064,11 @@ func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableEle
 		}
 		return owner
 	}
+}
+
+// Deprecated: Use On() instead.
+func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
+	return On(events...)
 }
 
 // After creates a time-based transition that occurs after a specified duration.
