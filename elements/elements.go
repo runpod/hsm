@@ -23,7 +23,6 @@ type Model interface {
 	Namespace
 }
 
-type Signal = chan struct{}
 type Transition interface {
 	NamedElement
 	Source() string
@@ -52,11 +51,11 @@ type Event struct {
 	Data any    `json:"data"`
 
 	// Deprecated: Use WithSignal instead.
-	Done Signal `json:"-"`
+	Done chan struct{} `json:"-"`
 }
 
-func (e Event) WithData(data any, maybeDone ...Signal) Event {
-	var done Signal
+func (e Event) WithData(data any, maybeDone ...chan struct{}) Event {
+	var done chan struct{}
 	if len(maybeDone) > 0 {
 		done = maybeDone[0]
 	}
@@ -69,20 +68,15 @@ func (e Event) WithData(data any, maybeDone ...Signal) Event {
 	}
 }
 
-// Deprecated: Use WithData instead.
-func (e Event) WithSignal(signal Signal) Event {
+// Deprecated: Events can't wait anymore, hsm processing waits for all events by default
+func (e Event) WithDone(done chan struct{}) Event {
 	return Event{
 		Kind: e.Kind,
 		Name: e.Name,
 		Id:   e.Id,
 		Data: e.Data,
-		Done: signal,
+		Done: done,
 	}
-}
-
-// Deprecated: Use WithSignal instead.
-func (e Event) WithDone(done chan struct{}) Event {
-	return e.WithSignal(done)
 }
 
 type Constraint interface {

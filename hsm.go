@@ -696,6 +696,11 @@ func Source[T interface{ RedefinableElement | string }](nameOrPartialElement T) 
 	}
 }
 
+// Defer schedules events to be processed after the current state is exited.
+//
+// Example:
+//
+//	hsm.Defer(hsm.Event{Name: "event_name"})
 func Defer[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
 	traceback := traceback()
 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
@@ -1132,6 +1137,13 @@ func After[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 	}
 }
 
+// Every schedules events to be processed on an interval.
+//
+// Example:
+//
+//	hsm.Every(func(ctx context.Context, hsm T, event Event) time.Duration {
+//	    return time.Second * 30
+//	})
 func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.Duration) RedefinableElement {
 	traceback := traceback()
 	name := getFunctionName(expr)
@@ -1283,10 +1295,10 @@ type Instance interface {
 	State() string
 	Context() context.Context
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
-	Dispatch(ctx context.Context, event Event) Signal
-	Wait() Signal
+	Dispatch(ctx context.Context, event Event) <-chan struct{}
+	Wait() <-chan struct{}
 	QueueLen() int
-	Stop(ctx context.Context) Signal
+	Stop(ctx context.Context) <-chan struct{}
 	Restart(ctx context.Context)
 	start(Instance)
 }
@@ -1327,16 +1339,14 @@ type timeouts struct {
 	terminate time.Duration
 }
 
-type Signal = elements.Signal
-
 type mutex struct {
 	internal sync.Mutex
-	signal   Signal
+	signal   chan struct{}
 }
 
 func (mutex *mutex) Lock() {
 	mutex.internal.Lock()
-	mutex.signal = make(Signal)
+	mutex.signal = make(chan struct{})
 }
 
 func (mutex *mutex) Unlock() {
@@ -1344,13 +1354,13 @@ func (mutex *mutex) Unlock() {
 	close(mutex.signal)
 }
 
-func (mutex *mutex) Wait() Signal {
+func (mutex *mutex) Wait() <-chan struct{} {
 	return mutex.signal
 }
 
 func (mutex *mutex) TryLock() bool {
 	if mutex.internal.TryLock() {
-		mutex.signal = make(Signal)
+		mutex.signal = make(chan struct{})
 		return true
 	}
 	return false
@@ -1571,7 +1581,7 @@ func (sm *hsm[T]) Restart(ctx context.Context) {
 	(*hsm[T])(sm).start(sm)
 }
 
-func (sm *hsm[T]) Stop(ctx context.Context) Signal {
+func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 	if sm == nil {
 		return doneSignal
 	}
@@ -1632,7 +1642,7 @@ func (sm *hsm[T]) Context() context.Context {
 	return sm.context
 }
 
-func (sm *hsm[T]) Wait() Signal {
+func (sm *hsm[T]) Wait() <-chan struct{} {
 	if sm == nil {
 		return doneSignal
 	}
@@ -1945,7 +1955,7 @@ func (sm *hsm[T]) QueueLen() int {
 	return sm.queue.len()
 }
 
-func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) Signal {
+func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	if sm == nil {
 		return done(event.Done)
 	}
@@ -1979,7 +1989,7 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) Signal {
 //	sm := hsm.Start(...)
 //	done := sm.Dispatch(hsm.Event{Name: "start"})
 //	<-done // Wait for event processing to complete
-func Dispatch[T context.Context](ctx T, event Event) Signal {
+func Dispatch[T context.Context](ctx T, event Event) <-chan struct{} {
 	// avoid indirection if we already have an instance
 	switch c := any(ctx).(type) {
 	case Instance:
@@ -2002,23 +2012,23 @@ func Dispatch[T context.Context](ctx T, event Event) Signal {
 //	sm2 := hsm.Start(...)
 //	done := hsm.DispatchAll(context.Background(), hsm.Event{Name: "globalEvent"})
 //	<-done // Wait for all instances to process the event
-func DispatchAll(ctx context.Context, event Event) Signal {
+func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
 	return DispatchTo(ctx, event)
 }
 
-func DispatchTo(ctx context.Context, event Event, maybeIds ...string) Signal {
+func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan struct{} {
 	all, ok := ctx.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
-		return noevent.Done
+		return doneSignal
 	}
-	signal := make(Signal)
+	signal := make(chan struct{})
 	if !ok {
 		close(signal)
 		return signal
 	}
-	go func(signal Signal) {
+	go func(signal chan struct{}) {
 		defer done(signal)
-		signals := []Signal{}
+		signals := []<-chan struct{}{}
 		all.Range(func(id string, sm Instance) bool {
 			if len(maybeIds) == 0 || Match(id, maybeIds...) {
 				if signal != nil {
@@ -2056,7 +2066,7 @@ func FromContext(ctx context.Context) (Instance, bool) {
 	return nil, false
 }
 
-func done(channel chan struct{}) Signal {
+func done(channel chan struct{}) <-chan struct{} {
 	if channel == nil {
 		return noevent.Done
 	}
