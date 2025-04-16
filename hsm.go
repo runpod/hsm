@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/runpod/aiapi/pkg/priorityflashboot/syncmap"
 	"github.com/runpod/hsm/elements"
 	"github.com/runpod/hsm/kind"
 )
@@ -239,14 +240,14 @@ func DecodeEvent[T any](event Event) (DecodedEvent[T], bool) {
 	}, ok
 }
 
-var closedChannel = func() chan struct{} {
+var doneSignal = func() chan struct{} {
 	done := make(chan struct{})
 	close(done)
 	return done
 }()
 
 var noevent = Event{
-	Done: closedChannel,
+	Done: doneSignal,
 }
 
 type queue struct {
@@ -695,6 +696,11 @@ func Source[T interface{ RedefinableElement | string }](nameOrPartialElement T) 
 	}
 }
 
+// Defer schedules events to be processed after the current state is exited.
+//
+// Example:
+//
+//	hsm.Defer(hsm.Event{Name: "event_name"})
 func Defer[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
 	traceback := traceback()
 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
@@ -854,7 +860,7 @@ func Initial[T interface{ string | RedefinableElement }](elementOrName T, partia
 		}
 		model.members[initial.QualifiedName()] = initial
 		stack = append(stack, initial)
-		transition := (Transition(Source(initial.QualifiedName()), append(partialElements, Trigger(InitialEvent))...)(model, stack)).(*transition)
+		transition := (Transition(Source(initial.QualifiedName()), append(partialElements, On(InitialEvent))...)(model, stack)).(*transition)
 		// validation logic
 		if transition.guard != "" {
 			traceback(fmt.Errorf("initial \"%s\" cannot have a guard", initial.QualifiedName()))
@@ -1028,17 +1034,17 @@ func Exit[T Instance](funcs ...func(ctx context.Context, hsm T, event Event)) Re
 	}
 }
 
-// Trigger defines the events that can cause a transition.
+// On defines the events that can cause a transition.
 // Multiple events can be specified for a single transition.
 //
 // Example:
 //
 //	hsm.Transition(
-//	    hsm.Trigger("start", "resume"),
+//	    hsm.On("start", "resume"),
 //	    hsm.Source("idle"),
 //	    hsm.Target("running")
 //	)
-func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
+func On[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
 	traceback := traceback()
 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
 		owner := find(stack, kind.Transition)
@@ -1063,6 +1069,11 @@ func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableEle
 		}
 		return owner
 	}
+}
+
+// Deprecated: Use On() instead.
+func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
+	return On(events...)
 }
 
 // After creates a time-based transition that occurs after a specified duration.
@@ -1126,6 +1137,13 @@ func After[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 	}
 }
 
+// Every schedules events to be processed on an interval.
+//
+// Example:
+//
+//	hsm.Every(func(ctx context.Context, hsm T, event Event) time.Duration {
+//	    return time.Second * 30
+//	})
 func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.Duration) RedefinableElement {
 	traceback := traceback()
 	name := getFunctionName(expr)
@@ -1278,6 +1296,7 @@ type Instance interface {
 	Context() context.Context
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
 	Dispatch(ctx context.Context, event Event) <-chan struct{}
+	Wait() <-chan struct{}
 	QueueLen() int
 	Stop(ctx context.Context) <-chan struct{}
 	Restart(ctx context.Context)
@@ -1320,6 +1339,33 @@ type timeouts struct {
 	terminate time.Duration
 }
 
+type mutex struct {
+	internal sync.Mutex
+	signal   chan struct{}
+}
+
+func (mutex *mutex) Lock() {
+	mutex.internal.Lock()
+	mutex.signal = make(chan struct{})
+}
+
+func (mutex *mutex) Unlock() {
+	mutex.internal.Unlock()
+	close(mutex.signal)
+}
+
+func (mutex *mutex) Wait() <-chan struct{} {
+	return mutex.signal
+}
+
+func (mutex *mutex) TryLock() bool {
+	if mutex.internal.TryLock() {
+		mutex.signal = make(chan struct{})
+		return true
+	}
+	return false
+}
+
 type hsm[T Instance] struct {
 	behavior[T]
 	context    context.Context
@@ -1330,7 +1376,7 @@ type hsm[T Instance] struct {
 	instance   T
 	trace      Trace
 	timeouts   timeouts
-	processing sync.Mutex
+	processing mutex
 	mutex      sync.RWMutex
 	logger     Logger
 }
@@ -1357,10 +1403,10 @@ type Config struct {
 type key[T any] struct{}
 
 var Keys = struct {
-	All key[*sync.Map]
+	All key[*syncmap.SyncMap[string, Instance]]
 	HSM key[HSM]
 }{
-	All: key[*sync.Map]{},
+	All: key[*syncmap.SyncMap[string, Instance]]{},
 	HSM: key[HSM]{},
 }
 
@@ -1519,9 +1565,9 @@ func (sm *hsm[T]) State() string {
 }
 
 func (sm *hsm[T]) start(active Instance) {
-	all, ok := sm.context.Value(Keys.All).(*sync.Map)
+	all, ok := sm.context.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
-		all = &sync.Map{}
+		all = &syncmap.SyncMap[string, Instance]{}
 	}
 	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.All, all), Keys.HSM, sm), sm)
 	sm.context = ctx
@@ -1537,7 +1583,7 @@ func (sm *hsm[T]) Restart(ctx context.Context) {
 
 func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 	if sm == nil {
-		return closedChannel
+		return doneSignal
 	}
 	if sm.trace != nil {
 		var end func(...any)
@@ -1594,6 +1640,13 @@ func (sm *hsm[T]) Context() context.Context {
 		return nil
 	}
 	return sm.context
+}
+
+func (sm *hsm[T]) Wait() <-chan struct{} {
+	if sm == nil {
+		return doneSignal
+	}
+	return sm.processing.Wait()
 }
 
 // Stop gracefully stops a state machine instance.
@@ -1845,14 +1898,13 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 }
 
 func (sm *hsm[T]) process(ctx context.Context) {
-	var eventDone = closedChannel
+	var eventDone = doneSignal
 	defer func() {
 		if r := recover(); r != nil {
 			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r), eventDone))
 		}
-
+		sm.processing.Unlock()
 	}()
-	defer sm.processing.Unlock()
 	if sm == nil {
 		return
 	}
@@ -1890,10 +1942,10 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		if isDeferred {
 			continue
 		}
-		if ok && kind.IsKind(event.Kind, kind.CompletionEvent) {
-			event.Done = eventDone
-			continue
-		}
+		// if ok && kind.IsKind(event.Kind, kind.CompletionEvent) {
+		// 	event.Done = eventDone
+		// 	continue
+		// }
 		done(eventDone)
 	}
 	sm.queue.push(deferred...)
@@ -1914,7 +1966,7 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 		event.Kind = kind.Event
 	}
 	if event.Done == nil {
-		event.Done = closedChannel
+		event.Done = doneSignal
 	}
 	if sm.trace != nil {
 		var end func(...any)
@@ -1924,9 +1976,9 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	sm.queue.push(event)
 	if sm.processing.TryLock() {
 		go sm.process(ctx)
-		return event.Done
+		return sm.processing.Wait()
 	}
-	return event.Done
+	return sm.processing.Wait()
 }
 
 // Dispatch sends an event to a specific state machine instance.
@@ -1961,35 +2013,41 @@ func Dispatch[T context.Context](ctx T, event Event) <-chan struct{} {
 //	done := hsm.DispatchAll(context.Background(), hsm.Event{Name: "globalEvent"})
 //	<-done // Wait for all instances to process the event
 func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
-	all, ok := ctx.Value(Keys.All).(*sync.Map)
-	if !ok {
-		return done(event.Done)
-	}
-	all.Range(func(_ any, value any) bool {
-		maybeSM, ok := value.(Instance)
-		if !ok {
-			return true
-		}
-		maybeSM.Dispatch(ctx, event)
-		return true
-	})
-	return event.Done
+	return DispatchTo(ctx, event)
 }
 
-func DispatchTo(ctx context.Context, id string, event Event) <-chan struct{} {
-	all, ok := ctx.Value(Keys.All).(*sync.Map)
+func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan struct{} {
+	all, ok := ctx.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
-		return done(event.Done)
+		return doneSignal
 	}
-	hsm, ok := all.Load(id)
+	signal := make(chan struct{})
 	if !ok {
-		return done(event.Done)
+		close(signal)
+		return signal
 	}
-	maybeSM, ok := hsm.(Instance)
-	if !ok {
-		return done(event.Done)
-	}
-	return maybeSM.Dispatch(ctx, event)
+	go func(signal chan struct{}) {
+		defer done(signal)
+		signals := []<-chan struct{}{}
+		all.Range(func(id string, sm Instance) bool {
+			if len(maybeIds) == 0 || Match(id, maybeIds...) {
+				if signal != nil {
+					signals = append(signals, sm.Dispatch(ctx, event))
+				} else {
+					sm.Dispatch(ctx, event)
+				}
+			}
+			return true
+		})
+		for _, ch := range signals {
+			select {
+			case <-ch:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}(signal)
+	return signal
 }
 
 // FromContext retrieves a state machine instance from a context.
@@ -2019,15 +2077,7 @@ func done(channel chan struct{}) <-chan struct{} {
 			return channel
 		}
 	default:
-		// Channel is open, try to send a value
-		select {
-		case channel <- struct{}{}:
-			return channel
-			// Successfully sent completion signal
-		default:
-			// Channel already has a value
-		}
+		close(channel)
 	}
-	close(channel)
 	return channel
 }

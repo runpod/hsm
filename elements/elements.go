@@ -45,10 +45,12 @@ type State interface {
 }
 
 type Event struct {
-	Kind uint64        `json:"kind"`
-	Name string        `json:"name"`
-	Id   string        `json:"id"`
-	Data any           `json:"data"`
+	Kind uint64 `json:"kind"`
+	Name string `json:"name"`
+	Id   string `json:"id"`
+	Data any    `json:"data"`
+
+	// Deprecated: Use WithSignal instead.
 	Done chan struct{} `json:"-"`
 }
 
@@ -66,6 +68,7 @@ func (e Event) WithData(data any, maybeDone ...chan struct{}) Event {
 	}
 }
 
+// Deprecated: Events can't wait anymore, hsm processing waits for all events by default
 func (e Event) WithDone(done chan struct{}) Event {
 	return Event{
 		Kind: e.Kind,
