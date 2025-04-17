@@ -28,7 +28,7 @@
 //	    return val%2 == 0
 //	}
 //	snapshot, _ := m.Snapshot(evenOnly)
-package typesafe
+package syncmap
 
 import (
 	"sync"
