@@ -15,9 +15,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/runpod/aiapi/pkg/priorityflashboot/syncmap"
 	"github.com/runpod/hsm/elements"
 	"github.com/runpod/hsm/kind"
+	"github.com/runpod/hsm/syncmap"
 )
 
 var (

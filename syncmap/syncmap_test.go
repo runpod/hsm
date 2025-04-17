@@ -1,16 +1,16 @@
-package typesafe_test
+package syncmap_test
 
 import (
 	"fmt"
 	"sync"
 	"testing"
 
-	"github.com/runpod/host/pkg/priorityflashboot/typesafe"
+	"github.com/runpod/hsm/syncmap"
 )
 
 func TestSyncMap(t *testing.T) {
 	t.Run("basic operations", func(t *testing.T) {
-		m := typesafe.SyncMap[string, int]{}
+		m := syncmap.SyncMap[string, int]{}
 
 		// Test Set and Get
 		m.Store("a", 1)
@@ -47,7 +47,7 @@ func TestSyncMap(t *testing.T) {
 	})
 
 	t.Run("filtered snapshot", func(t *testing.T) {
-		m := typesafe.SyncMap[string, int]{}
+		m := syncmap.SyncMap[string, int]{}
 
 		// Populate the map with test data
 		m.Store("a", 1)
@@ -96,7 +96,7 @@ func TestSyncMap(t *testing.T) {
 	})
 
 	t.Run("concurrent load or store", func(t *testing.T) {
-		m := typesafe.SyncMap[string, int]{}
+		m := syncmap.SyncMap[string, int]{}
 
 		// Test LoadOrStore when key doesn't exist
 		val, loaded := m.LoadOrStore("x", 10)
@@ -112,7 +112,7 @@ func TestSyncMap(t *testing.T) {
 	})
 
 	t.Run("load and delete", func(t *testing.T) {
-		m := typesafe.SyncMap[string, int]{}
+		m := syncmap.SyncMap[string, int]{}
 
 		// Test LoadAndDelete on non-existent key
 		val, loaded := m.LoadAndDelete("x")
@@ -134,7 +134,7 @@ func TestSyncMap(t *testing.T) {
 	})
 
 	t.Run("range operations", func(t *testing.T) {
-		m := typesafe.SyncMap[string, int]{}
+		m := syncmap.SyncMap[string, int]{}
 		testData := map[string]int{
 			"a": 1,
 			"b": 2,
@@ -174,7 +174,7 @@ func TestSyncMap(t *testing.T) {
 	})
 
 	t.Run("clear operation", func(t *testing.T) {
-		m := typesafe.SyncMap[string, int]{}
+		m := syncmap.SyncMap[string, int]{}
 
 		// Populate the map
 		m.Store("a", 1)
@@ -194,7 +194,7 @@ func TestSyncMap(t *testing.T) {
 	})
 
 	t.Run("length tracking accuracy", func(t *testing.T) {
-		m := typesafe.SyncMap[string, int]{}
+		m := syncmap.SyncMap[string, int]{}
 
 		// Test empty map
 		if m.Len() != 0 {
@@ -276,7 +276,7 @@ func TestSyncMap(t *testing.T) {
 func BenchmarkMaps(b *testing.B) {
 	b.Run("store", func(b *testing.B) {
 		b.Run("syncmap", func(b *testing.B) {
-			m := typesafe.SyncMap[int, int]{}
+			m := syncmap.SyncMap[int, int]{}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				m.Store(i, i)
@@ -294,7 +294,7 @@ func BenchmarkMaps(b *testing.B) {
 
 	b.Run("load", func(b *testing.B) {
 		b.Run("syncmap", func(b *testing.B) {
-			m := typesafe.SyncMap[int, int]{}
+			m := syncmap.SyncMap[int, int]{}
 			for i := 0; i < 1000; i++ {
 				m.Store(i, i)
 			}
@@ -318,7 +318,7 @@ func BenchmarkMaps(b *testing.B) {
 
 	b.Run("load_or_store", func(b *testing.B) {
 		b.Run("syncmap", func(b *testing.B) {
-			m := typesafe.SyncMap[int, int]{}
+			m := syncmap.SyncMap[int, int]{}
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
 				m.LoadOrStore(i%100, i)
@@ -336,7 +336,7 @@ func BenchmarkMaps(b *testing.B) {
 
 	b.Run("delete", func(b *testing.B) {
 		b.Run("syncmap", func(b *testing.B) {
-			m := typesafe.SyncMap[int, int]{}
+			m := syncmap.SyncMap[int, int]{}
 			for i := 0; i < 1000; i++ {
 				m.Store(i, i)
 			}
@@ -363,7 +363,7 @@ func BenchmarkMaps(b *testing.B) {
 			name := fmt.Sprintf("goroutines_%d", goroutines)
 
 			b.Run(name+"/syncmap", func(b *testing.B) {
-				m := typesafe.SyncMap[int, int]{}
+				m := syncmap.SyncMap[int, int]{}
 				var wg sync.WaitGroup
 				b.ResetTimer()
 
@@ -422,7 +422,7 @@ func BenchmarkMaps(b *testing.B) {
 			name := fmt.Sprintf("size_%d", size)
 
 			b.Run(name+"/syncmap", func(b *testing.B) {
-				m := typesafe.SyncMap[int, int]{}
+				m := syncmap.SyncMap[int, int]{}
 				for i := 0; i < size; i++ {
 					m.Store(i, i)
 				}
