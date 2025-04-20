@@ -1,6 +1,8 @@
 name: Version Check
 
 on:
+  push:
+    branches-ignore: [main, master]
   pull_request:
     branches: [main, master]
     types: [opened, ready_for_review]
