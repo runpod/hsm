@@ -1574,6 +1574,7 @@ func (sm *hsm[T]) start(instance Instance, event *Event) {
 func (sm *hsm[T]) Restart(ctx context.Context) {
 	<-sm.Stop(ctx)
 	sm.processing.lock()
+	sm.context = ctx
 	(*hsm[T])(sm).start(sm, &InitialEvent)
 }
 
