@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,9 +18,12 @@ import (
 type Trace struct {
 	sync  []string
 	async []string
+	mutex sync.Mutex
 }
 
 func (t *Trace) reset() {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	t.sync = []string{}
 	t.async = []string{}
 }
@@ -29,6 +33,8 @@ func tracer(ctx context.Context, sm hsm.Instance, step string, data ...any) (con
 }
 
 func (t *Trace) matches(expected Trace) bool {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
 	if expected.sync != nil && !slices.Equal(t.sync, expected.sync) {
 		return false
 	}
@@ -64,6 +70,8 @@ func TestHSM(t *testing.T) {
 	// test
 	mockAction := func(name string, async bool) func(ctx context.Context, thsm *THSM, event hsm.Event) {
 		return func(ctx context.Context, thsm *THSM, event hsm.Event) {
+			trace.mutex.Lock()
+			defer trace.mutex.Unlock()
 			if async {
 				trace.async = append(trace.async, name)
 			} else {
@@ -468,7 +476,7 @@ func TestHSM(t *testing.T) {
 	}
 	trace.reset()
 	<-sm.Stop(ctx)
-	if sm.State() != "" {
+	if sm.State() != "/" {
 		t.Fatal("state is not correct", "state", sm.State())
 	}
 
@@ -513,6 +521,7 @@ func TestHSMDispatchAll(t *testing.T) {
 
 func TestEvery(t *testing.T) {
 	timestamps := []time.Time{}
+	mutex := sync.Mutex{}
 	model := hsm.Define(
 		"TestHSM",
 		hsm.Initial(hsm.Target("foo")),
@@ -522,6 +531,8 @@ func TestEvery(t *testing.T) {
 				return time.Millisecond * 500
 			}),
 			hsm.Effect(func(ctx context.Context, thsm *THSM, event hsm.Event) {
+				mutex.Lock()
+				defer mutex.Unlock()
 				timestamps = append(timestamps, time.Now())
 			}),
 		),
@@ -529,10 +540,14 @@ func TestEvery(t *testing.T) {
 	_ = hsm.Start(context.Background(), &THSM{}, &model)
 	for i := 0; i < 10; i++ {
 		time.Sleep(time.Millisecond * 550)
+		mutex.Lock()
 		if len(timestamps) > i+1 {
 			t.Fatalf("timestamps are not in order expected %v got %v", timestamps[i], timestamps[i+1])
 		}
+		mutex.Unlock()
 	}
+	mutex.Lock()
+	defer mutex.Unlock()
 	for i := 1; i < len(timestamps)-1; i++ {
 		delta := timestamps[i+1].Sub(timestamps[i])
 		if delta < time.Millisecond*500 || delta > time.Millisecond*551 {

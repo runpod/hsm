@@ -1333,26 +1333,29 @@ type timeouts struct {
 
 type mutex struct {
 	internal sync.Mutex
-	signal   chan struct{}
+
+	signal atomic.Value
 }
 
 func (mutex *mutex) lock() {
 	mutex.internal.Lock()
-	mutex.signal = make(chan struct{})
+	mutex.signal.Store(make(chan struct{}))
 }
 
 func (mutex *mutex) unlock() {
 	mutex.internal.Unlock()
-	close(mutex.signal)
+	signal := mutex.signal.Load().(chan struct{})
+	close(signal)
 }
 
 func (mutex *mutex) wait() <-chan struct{} {
-	return mutex.signal
+	signal := mutex.signal.Load().(chan struct{})
+	return signal
 }
 
 func (mutex *mutex) tryLock() bool {
 	if mutex.internal.TryLock() {
-		mutex.signal = make(chan struct{})
+		mutex.signal.Store(make(chan struct{}))
 		return true
 	}
 	return false
@@ -1361,7 +1364,7 @@ func (mutex *mutex) tryLock() bool {
 type hsm[T Instance] struct {
 	behavior[T]
 	context    context.Context
-	state      elements.NamedElement
+	state      atomic.Value
 	model      *Model
 	active     map[string]*active
 	queue      queue
@@ -1369,8 +1372,8 @@ type hsm[T Instance] struct {
 	trace      Trace
 	timeouts   timeouts
 	processing mutex
-	mutex      sync.RWMutex
-	logger     Logger
+	// mutex      sync.RWMutex
+	logger Logger
 }
 
 // Trace is a function type for tracing state machine execution.
@@ -1515,12 +1518,12 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 			},
 		},
 		model:    model,
-		state:    &model.state,
 		active:   map[string]*active{},
 		instance: sm,
 		queue:    queue{},
 		context:  ctx,
 	}
+	hsm.state.Store(&model.state)
 	initialEvent := InitialEvent
 	hsm.processing.lock()
 	if len(config) > 0 {
@@ -1541,7 +1544,7 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 		hsm.timeouts.terminate = time.Millisecond
 	}
 	hsm.operation = func(ctx context.Context, _ T, event Event) {
-		hsm.state = hsm.enter(ctx, &hsm.model.state, &event, true)
+		hsm.state.Store(hsm.enter(ctx, &hsm.model.state, &event, true))
 		hsm.process(ctx)
 	}
 	sm.start(hsm, &initialEvent)
@@ -1552,12 +1555,11 @@ func (sm *hsm[T]) State() string {
 	if sm == nil {
 		return ""
 	}
-	sm.mutex.RLock()
-	defer sm.mutex.RUnlock()
-	if sm.state == nil {
+	state := sm.state.Load().(elements.NamedElement)
+	if state == nil {
 		return ""
 	}
-	return sm.state.QualifiedName()
+	return state.QualifiedName()
 }
 
 func (sm *hsm[T]) start(instance Instance, event *Event) {
@@ -1597,20 +1599,21 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 		sm.processing.lock()
 
 		var ok bool
-		for sm.state != nil {
+		state := sm.state.Load().(elements.NamedElement)
+		for state != nil {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				sm.exit(ctx, sm.state, &noevent)
-				sm.state, ok = sm.model.members[sm.state.Owner()]
+				sm.exit(ctx, state, &noevent)
+				state, ok = sm.model.members[state.Owner()]
 				if ok {
+					sm.state.Store(state)
 					continue
 				}
 			}
 			break
 		}
-
 		if active, ok := sm.active[sm.QualifiedName()]; ok {
 			active.cancel()
 		}
@@ -1911,17 +1914,16 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
-		qualifiedName := sm.state.QualifiedName()
+		currentState := sm.state.Load().(elements.NamedElement)
+		qualifiedName := currentState.QualifiedName()
 		for qualifiedName != "" {
 			source := get[*state](sm.model, qualifiedName)
 			if source == nil {
 				break
 			}
 			if transition := sm.enabled(ctx, source, &event); transition != nil {
-				state := sm.transition(ctx, sm.state, transition, &event)
-				sm.mutex.Lock()
-				sm.state = state
-				sm.mutex.Unlock()
+				state := sm.transition(ctx, currentState, transition, &event)
+				sm.state.Store(state)
 				break
 			}
 			if matches := Match(event.Name, source.deferred...); matches {
@@ -1943,7 +1945,8 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	if sm == nil {
 		return closedChannel
 	}
-	if sm.state == nil {
+	state := sm.state.Load().(elements.NamedElement)
+	if state == nil {
 		return closedChannel
 	}
 	if event.Kind == 0 {
