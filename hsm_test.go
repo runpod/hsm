@@ -966,7 +966,7 @@ func TestDispatch(t *testing.T) {
 	if sm.State() != "/foo" {
 		t.Fatalf("Expected state to be foo, got: %s", sm.State())
 	}
-	done := hsm.Dispatch(sm.Context(), hsm.Event{Name: "foo", Done: make(chan struct{})})
+	done := hsm.Dispatch(sm.Context(), hsm.Event{Name: "foo"})
 	<-done
 	if sm.State() != "/bar" {
 		t.Fatalf("Expected state to be bar, got: %s", sm.State())

@@ -1574,7 +1574,6 @@ func (sm *hsm[T]) start(instance Instance, event *Event) {
 func (sm *hsm[T]) Restart(ctx context.Context) {
 	<-sm.Stop(ctx)
 	sm.processing.lock()
-	sm.context = ctx
 	(*hsm[T])(sm).start(sm, &InitialEvent)
 }
 
@@ -1621,7 +1620,6 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 		}
 		close(done)
 		sm.processing.unlock()
-		sm.context = nil
 	}()
 	return done
 }
