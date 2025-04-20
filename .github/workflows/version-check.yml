@@ -20,7 +20,6 @@ jobs:
       - name: Get base version
         id: base_version
         run: |
-          set -x # Enable debugging
           BASE_VERSION="v0.0.0" # Default
           TARGET_REF=""
 
@@ -42,14 +41,14 @@ jobs:
           FULL_TARGET_REF="origin/$TARGET_REF"
 
           # Check if file exists on the target ref
-          if ! git cat-file -e $FULL_TARGET_REF:version.go; then
+          if ! git cat-file -e $FULL_TARGET_REF:version.go 2>/dev/null; then
             echo "version.go does not exist on base branch $FULL_TARGET_REF"
             # Keep default BASE_VERSION = v0.0.0
           else
             echo "Attempting to get version from $FULL_TARGET_REF:version.go"
             GIT_SHOW_OUTPUT=$(git show $FULL_TARGET_REF:version.go 2>/dev/null)
-            echo "Raw output from git show:"
-            echo "$GIT_SHOW_OUTPUT"
+            # echo "Raw output from git show:"
+            # echo "$GIT_SHOW_OUTPUT"
             
             EXTRACTED_VERSION=$(echo "$GIT_SHOW_OUTPUT" | grep 'const Version = ' | cut -d'"' -f2 || echo "")
             if [ -n "$EXTRACTED_VERSION" ]; then
@@ -60,14 +59,12 @@ jobs:
             fi
           fi
 
-          set +x # Disable debugging
           echo "Final Base Version: $BASE_VERSION"
           echo "base_version=$BASE_VERSION" >> $GITHUB_OUTPUT
 
       - name: Get PR version
         id: pr_version
         run: |
-          set -x # Enable debugging
           if [ ! -f version.go ]; then
              echo "version.go not found in PR branch checkout"
              exit 1
@@ -77,7 +74,6 @@ jobs:
             echo "Could not find version string in PR branch version.go"
             exit 1
           fi
-          set +x # Disable debugging
           echo "Final PR Version: $PR_VERSION"
           echo "pr_version=$PR_VERSION" >> $GITHUB_OUTPUT
 
