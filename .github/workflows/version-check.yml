@@ -9,6 +9,7 @@ on:
 
 jobs:
   check-version:
+    name: Checking Version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
