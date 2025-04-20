@@ -21,11 +21,14 @@ import (
 )
 
 var (
-	Kinds             = kind.Kinds()
-	ErrNilHSM         = errors.New("hsm is nil")
-	ErrInvalidState   = errors.New("invalid state")
-	ErrMissingHSM     = errors.New("missing hsm in context")
-	ErrInvalidPattern = errors.New("invalid pattern")
+	Kinds               = kind.Kinds()
+	EventKind           = kind.Event
+	CompletionEventKind = kind.CompletionEvent
+	ErrorEventKind      = kind.ErrorEvent
+	ErrNilHSM           = errors.New("hsm is nil")
+	ErrInvalidState     = errors.New("invalid state")
+	ErrMissingHSM       = errors.New("missing hsm in context")
+	ErrInvalidPattern   = errors.New("invalid pattern")
 )
 
 // Package hsm provides a powerful hierarchical state machine (HSM) implementation for Go.
