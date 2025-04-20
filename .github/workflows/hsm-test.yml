@@ -31,7 +31,9 @@ jobs:
             ${{ runner.os }}-go-
 
       - name: Run tests
+        id: regular_tests
         run: go test -v ./...
 
       - name: Run tests with race detection
+        id: race_tests
         run: go test -race -short ./...
