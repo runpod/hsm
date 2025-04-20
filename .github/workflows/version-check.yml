@@ -1,0 +1,36 @@
+name: Version Check
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - "version.go"
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get base version
+        id: base_version
+        run: |
+          git fetch origin ${{ github.base_ref }}
+          BASE_VERSION=$(git show origin/${{ github.base_ref }}:version.go | grep 'const Version = ' | cut -d'"' -f2)
+          echo "base_version=$BASE_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Get PR version
+        id: pr_version
+        run: |
+          PR_VERSION=$(grep 'const Version = ' version.go | cut -d'"' -f2)
+          echo "pr_version=$PR_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check version update
+        run: |
+          if [ "${{ steps.base_version.outputs.base_version }}" = "${{ steps.pr_version.outputs.pr_version }}" ]; then
+            echo "Version must be updated in version.go before creating a PR"
+            echo "Current version: ${{ steps.base_version.outputs.base_version }}"
+            exit 1
+          fi
