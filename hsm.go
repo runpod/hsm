@@ -196,16 +196,19 @@ func (transition *transition) Target() string {
 
 /******* Behavior *******/
 
+type Operation[T Instance] func(ctx context.Context, hsm T, event Event)
+type Expression[T Instance] func(ctx context.Context, hsm T, event Event) bool
+
 type behavior[T Instance] struct {
 	element
-	method func(ctx context.Context, hsm T, event Event)
+	operation Operation[T]
 }
 
 /******* Constraint *******/
 
 type constraint[T Instance] struct {
 	element
-	expression func(ctx context.Context, hsm T, event Event) bool
+	expression Expression[T]
 }
 
 /******* Events *******/
@@ -240,14 +243,14 @@ func DecodeEvent[T any](event Event) (DecodedEvent[T], bool) {
 	}, ok
 }
 
-var doneSignal = func() chan struct{} {
+var closedChannel = func() chan struct{} {
 	done := make(chan struct{})
 	close(done)
 	return done
 }()
 
 var noevent = Event{
-	Done: doneSignal,
+	Done: closedChannel,
 }
 
 type queue struct {
@@ -791,8 +794,8 @@ func Effect[T Instance](funcs ...func(ctx context.Context, hsm T, event Event)) 
 		for _, fn := range funcs {
 			name := getFunctionName(fn)
 			behavior := &behavior[T]{
-				element: element{kind: kind.Behavior, qualifiedName: path.Join(owner.QualifiedName(), name)},
-				method:  fn,
+				element:   element{kind: kind.Behavior, qualifiedName: path.Join(owner.QualifiedName(), name)},
+				operation: fn,
 			}
 			model.members[behavior.QualifiedName()] = behavior
 			owner.effect = append(owner.effect, behavior.QualifiedName())
@@ -961,8 +964,8 @@ func Entry[T Instance](funcs ...func(ctx context.Context, hsm T, event Event)) R
 		for _, fn := range funcs {
 			name := getFunctionName(fn)
 			element := &behavior[T]{
-				element: element{kind: kind.Behavior, qualifiedName: path.Join(owner.QualifiedName(), name)},
-				method:  fn,
+				element:   element{kind: kind.Behavior, qualifiedName: path.Join(owner.QualifiedName(), name)},
+				operation: fn,
 			}
 			model.members[element.QualifiedName()] = element
 			owner.entry = append(owner.entry, element.QualifiedName())
@@ -996,8 +999,8 @@ func Activity[T Instance](funcs ...func(ctx context.Context, hsm T, event Event)
 		for _, fn := range funcs {
 			name := getFunctionName(fn)
 			element := &behavior[T]{
-				element: element{kind: kind.Concurrent, qualifiedName: path.Join(owner.QualifiedName(), name)},
-				method:  fn,
+				element:   element{kind: kind.Concurrent, qualifiedName: path.Join(owner.QualifiedName(), name)},
+				operation: fn,
 			}
 			model.members[element.QualifiedName()] = element
 			owner.activities = append(owner.activities, element.QualifiedName())
@@ -1024,8 +1027,8 @@ func Exit[T Instance](funcs ...func(ctx context.Context, hsm T, event Event)) Re
 		for _, fn := range funcs {
 			name := getFunctionName(fn)
 			element := &behavior[T]{
-				element: element{kind: kind.Behavior, qualifiedName: path.Join(owner.QualifiedName(), name)},
-				method:  fn,
+				element:   element{kind: kind.Behavior, qualifiedName: path.Join(owner.QualifiedName(), name)},
+				operation: fn,
 			}
 			model.members[element.QualifiedName()] = element
 			owner.exit = append(owner.exit, element.QualifiedName())
@@ -1115,7 +1118,7 @@ func After[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 			}
 			activity := &behavior[T]{
 				element: element{kind: kind.Concurrent, qualifiedName: path.Join(source.QualifiedName(), "activity", qualifiedName)},
-				method: func(ctx context.Context, hsm T, _ Event) {
+				operation: func(ctx context.Context, hsm T, _ Event) {
 					duration := expr(ctx, hsm, event)
 					timer := time.NewTimer(duration)
 					select {
@@ -1171,7 +1174,7 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 			}
 			activity := &behavior[T]{
 				element: element{kind: kind.Concurrent, qualifiedName: path.Join(source.QualifiedName(), "activity", qualifiedName)},
-				method: func(ctx context.Context, hsm T, evt Event) {
+				operation: func(ctx context.Context, hsm T, evt Event) {
 					duration := expr(ctx, hsm, evt)
 					timer := time.NewTimer(duration)
 					defer timer.Stop()
@@ -1253,17 +1256,6 @@ func Log[T Instance](level slog.Level, msg string, args ...any) func(ctx context
 	}
 }
 
-func Submachine(name string, partialElements ...RedefinableElement) RedefinableElement {
-	traceback := traceback()
-	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
-		owner := find(stack, kind.StateMachine)
-		if owner == nil {
-			traceback(fmt.Errorf("submachine \"%s\" must be called within Define()", name))
-		}
-		return nil
-	}
-}
-
 // func Attribute(name string, maybeDefaultValue ...any) RedefinableElement {
 // 	traceback := traceback()
 // 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
@@ -1296,11 +1288,11 @@ type Instance interface {
 	Context() context.Context
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
 	Dispatch(ctx context.Context, event Event) <-chan struct{}
-	Wait() <-chan struct{}
+	Wait(ctx context.Context) <-chan struct{}
 	QueueLen() int
 	Stop(ctx context.Context) <-chan struct{}
 	Restart(ctx context.Context)
-	start(Instance)
+	start(Instance, *Event)
 }
 
 // Deprecated: Use Instance instead. Context will be removed in a future version.
@@ -1319,12 +1311,12 @@ type HSM struct {
 	Instance
 }
 
-func (hsm *HSM) start(instance Instance) {
+func (hsm *HSM) start(instance Instance, event *Event) {
 	if hsm == nil || hsm.Instance != nil {
 		return
 	}
 	hsm.Instance = instance
-	instance.start(hsm)
+	instance.start(hsm, event)
 }
 
 type subcontext = context.Context
@@ -1344,21 +1336,21 @@ type mutex struct {
 	signal   chan struct{}
 }
 
-func (mutex *mutex) Lock() {
+func (mutex *mutex) lock() {
 	mutex.internal.Lock()
 	mutex.signal = make(chan struct{})
 }
 
-func (mutex *mutex) Unlock() {
+func (mutex *mutex) unlock() {
 	mutex.internal.Unlock()
 	close(mutex.signal)
 }
 
-func (mutex *mutex) Wait() <-chan struct{} {
+func (mutex *mutex) wait() <-chan struct{} {
 	return mutex.signal
 }
 
-func (mutex *mutex) TryLock() bool {
+func (mutex *mutex) tryLock() bool {
 	if mutex.internal.TryLock() {
 		mutex.signal = make(chan struct{})
 		return true
@@ -1398,6 +1390,8 @@ type Config struct {
 	Name string
 	// Logger is a logger for the state machine.
 	Logger Logger
+	// Data to be passed during initialization
+	Data any
 }
 
 type key[T any] struct{}
@@ -1527,13 +1521,15 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 		queue:    queue{},
 		context:  ctx,
 	}
-	hsm.processing.Lock()
+	initialEvent := InitialEvent
+	hsm.processing.lock()
 	if len(config) > 0 {
 		hsm.trace = config[0].Trace
 		hsm.id = config[0].Id
 		hsm.timeouts.terminate = config[0].TerminateTimeout
 		hsm.qualifiedName = config[0].Name
 		hsm.logger = config[0].Logger
+		initialEvent = initialEvent.WithData(config[0].Data)
 	}
 	if hsm.id == "" {
 		hsm.id = id()
@@ -1544,11 +1540,11 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 	if hsm.timeouts.terminate == 0 {
 		hsm.timeouts.terminate = time.Millisecond
 	}
-	hsm.method = func(ctx context.Context, _ T, event Event) {
+	hsm.operation = func(ctx context.Context, _ T, event Event) {
 		hsm.state = hsm.enter(ctx, &hsm.model.state, &event, true)
 		hsm.process(ctx)
 	}
-	sm.start(hsm)
+	sm.start(hsm, &initialEvent)
 	return sm
 }
 
@@ -1564,7 +1560,7 @@ func (sm *hsm[T]) State() string {
 	return sm.state.QualifiedName()
 }
 
-func (sm *hsm[T]) start(active Instance) {
+func (sm *hsm[T]) start(instance Instance, event *Event) {
 	all, ok := sm.context.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
 		all = &syncmap.SyncMap[string, Instance]{}
@@ -1572,18 +1568,18 @@ func (sm *hsm[T]) start(active Instance) {
 	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.All, all), Keys.HSM, sm), sm)
 	sm.context = ctx
 	all.Store(sm.id, sm)
-	sm.execute(sm.context, &sm.behavior, &InitialEvent)
+	sm.execute(sm.context, &sm.behavior, event)
 }
 
 func (sm *hsm[T]) Restart(ctx context.Context) {
 	<-sm.Stop(ctx)
-	sm.processing.Lock()
-	(*hsm[T])(sm).start(sm)
+	sm.processing.lock()
+	(*hsm[T])(sm).start(sm, &InitialEvent)
 }
 
 func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 	if sm == nil {
-		return doneSignal
+		return closedChannel
 	}
 	if sm.trace != nil {
 		var end func(...any)
@@ -1598,7 +1594,7 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 				close(done)
 			}
 		}()
-		sm.processing.Lock()
+		sm.processing.lock()
 
 		var ok bool
 		for sm.state != nil {
@@ -1623,7 +1619,8 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			all.Delete(sm.id)
 		}
 		close(done)
-		sm.processing.Unlock()
+		sm.processing.unlock()
+		sm.context = nil
 	}()
 	return done
 }
@@ -1642,11 +1639,11 @@ func (sm *hsm[T]) Context() context.Context {
 	return sm.context
 }
 
-func (sm *hsm[T]) Wait() <-chan struct{} {
+func (sm *hsm[T]) Wait(ctx context.Context) <-chan struct{} {
 	if sm == nil {
-		return doneSignal
+		return closedChannel
 	}
-	return sm.processing.Wait()
+	return sm.processing.wait()
 }
 
 // Stop gracefully stops a state machine instance.
@@ -1781,11 +1778,11 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
 				}
 			}()
-			element.method(ctx, sm.instance, event)
+			element.operation(ctx, sm.instance, event)
 			ctx.channel <- struct{}{}
 		}(ctx, end, *event)
 	default:
-		element.method(ctx, sm.instance, *event)
+		element.operation(ctx, sm.instance, *event)
 	}
 
 }
@@ -1898,12 +1895,11 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 }
 
 func (sm *hsm[T]) process(ctx context.Context) {
-	var eventDone = doneSignal
 	defer func() {
 		if r := recover(); r != nil {
-			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r), eventDone))
+			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r)))
 		}
-		sm.processing.Unlock()
+		sm.processing.unlock()
 	}()
 	if sm == nil {
 		return
@@ -1916,9 +1912,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
-		eventDone = event.Done
 		qualifiedName := sm.state.QualifiedName()
-		isDeferred := false
 		for qualifiedName != "" {
 			source := get[*state](sm.model, qualifiedName)
 			if source == nil {
@@ -1932,21 +1926,12 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				break
 			}
 			if matches := Match(event.Name, source.deferred...); matches {
-				isDeferred = true
 				deferred = append(deferred, event)
 				break
 			}
 			qualifiedName = source.Owner()
 		}
 		event, ok = sm.queue.pop()
-		if isDeferred {
-			continue
-		}
-		// if ok && kind.IsKind(event.Kind, kind.CompletionEvent) {
-		// 	event.Done = eventDone
-		// 	continue
-		// }
-		done(eventDone)
 	}
 	sm.queue.push(deferred...)
 }
@@ -1957,16 +1942,13 @@ func (sm *hsm[T]) QueueLen() int {
 
 func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	if sm == nil {
-		return done(event.Done)
+		return closedChannel
 	}
 	if sm.state == nil {
-		return done(event.Done)
+		return closedChannel
 	}
 	if event.Kind == 0 {
 		event.Kind = kind.Event
-	}
-	if event.Done == nil {
-		event.Done = doneSignal
 	}
 	if sm.trace != nil {
 		var end func(...any)
@@ -1974,11 +1956,11 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 		defer end()
 	}
 	sm.queue.push(event)
-	if sm.processing.TryLock() {
+	if sm.processing.tryLock() {
 		go sm.process(ctx)
-		return sm.processing.Wait()
+		return sm.processing.wait()
 	}
-	return sm.processing.Wait()
+	return sm.processing.wait()
 }
 
 // Dispatch sends an event to a specific state machine instance.
@@ -2019,7 +2001,7 @@ func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
 func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan struct{} {
 	all, ok := ctx.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
 	if !ok {
-		return doneSignal
+		return closedChannel
 	}
 	signal := make(chan struct{})
 	if !ok {
