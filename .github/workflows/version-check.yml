@@ -14,31 +14,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          # Fetch all history for all tags and branches
           fetch-depth: 0
 
       - name: Get base version
         id: base_version
         run: |
           set -x # Enable debugging
-          git fetch origin ${{ github.base_ref }}
+          BASE_VERSION="v0.0.0" # Default
+          TARGET_REF=""
 
-          # Check if file exists on base branch
-          if ! git cat-file -e origin/${{ github.base_ref }}:version.go; then
-            echo "version.go does not exist on base branch origin/${{ github.base_ref }}"
-            BASE_VERSION="v0.0.0"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            TARGET_REF="${{ github.base_ref }}"
+            echo "Event is pull_request. Target ref: $TARGET_REF"
+            git fetch origin $TARGET_REF --depth=1
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            # Assuming 'main' is the primary base branch for push events
+            TARGET_REF="main"
+            echo "Event is push. Assuming base ref: $TARGET_REF"
+            git fetch origin $TARGET_REF --depth=1
           else
-            echo "Attempting to get version from origin/${{ github.base_ref }}:version.go"
-            GIT_SHOW_OUTPUT=$(git show origin/${{ github.base_ref }}:version.go 2>/dev/null)
+             echo "Unknown event type: ${{ github.event_name }}"
+             exit 1
+          fi
+
+          # Construct the full ref name
+          FULL_TARGET_REF="origin/$TARGET_REF"
+
+          # Check if file exists on the target ref
+          if ! git cat-file -e $FULL_TARGET_REF:version.go; then
+            echo "version.go does not exist on base branch $FULL_TARGET_REF"
+            # Keep default BASE_VERSION = v0.0.0
+          else
+            echo "Attempting to get version from $FULL_TARGET_REF:version.go"
+            GIT_SHOW_OUTPUT=$(git show $FULL_TARGET_REF:version.go 2>/dev/null)
             echo "Raw output from git show:"
             echo "$GIT_SHOW_OUTPUT"
             
-            BASE_VERSION=$(echo "$GIT_SHOW_OUTPUT" | grep 'const Version = ' | cut -d'"' -f2 || echo "")
+            EXTRACTED_VERSION=$(echo "$GIT_SHOW_OUTPUT" | grep 'const Version = ' | cut -d'"' -f2 || echo "")
+            if [ -n "$EXTRACTED_VERSION" ]; then
+              BASE_VERSION="$EXTRACTED_VERSION"
+            else
+              echo "Could not extract version string from base branch file."
+              # Keep default BASE_VERSION = v0.0.0
+            fi
           fi
 
-          if [ -z "$BASE_VERSION" ]; then
-            echo "Could not extract version string from base branch file. Assuming initial version."
-            BASE_VERSION="v0.0.0"
-          fi
           set +x # Disable debugging
           echo "Final Base Version: $BASE_VERSION"
           echo "base_version=$BASE_VERSION" >> $GITHUB_OUTPUT
