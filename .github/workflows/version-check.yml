@@ -42,20 +42,18 @@ jobs:
             IFS='.' read -r a1 a2 a3 <<< "$a"
             IFS='.' read -r b1 b2 b3 <<< "$b"
             
-            # Convert to integers for comparison
-            a1=$((10#$a1))
-            a2=$((10#$a2))
-            a3=$((10#$a3))
-            b1=$((10#$b1))
-            b2=$((10#$b2))
-            b3=$((10#$b3))
-            
+            # Compare major versions
             if [ "$a1" -gt "$b1" ]; then return 0; fi
             if [ "$a1" -lt "$b1" ]; then return 1; fi
+            
+            # Compare minor versions
             if [ "$a2" -gt "$b2" ]; then return 0; fi
             if [ "$a2" -lt "$b2" ]; then return 1; fi
+            
+            # Compare patch versions
             if [ "$a3" -gt "$b3" ]; then return 0; fi
             if [ "$a3" -lt "$b3" ]; then return 1; fi
+            
             return 1
           }
 
