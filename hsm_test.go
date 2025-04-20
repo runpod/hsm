@@ -130,7 +130,28 @@ func TestHSM(t *testing.T) {
 			),
 			hsm.Transition(hsm.On(`*.P.*`), hsm.Effect(mockAction("s11.P.transition.effect", false))),
 		),
-		hsm.State("t"),
+		hsm.State("t",
+			hsm.Entry(mockAction("t.entry", false)),
+			hsm.Activity(mockAction("t.activity", true)),
+			hsm.Exit(mockAction("t.exit", false)),
+			hsm.State(
+				"u",
+				hsm.Entry(mockAction("u.entry", false)),
+				hsm.Activity(mockAction("u.activity", true)),
+				hsm.Exit(mockAction("u.exit", false)),
+				hsm.Transition(
+					hsm.On("u.t"),
+					hsm.Target("/t"),
+					hsm.Effect(mockAction("u.t.transition.effect", false)),
+				),
+			),
+			hsm.Transition(
+				hsm.On("X"),
+				hsm.Target("/exit"),
+				hsm.Effect(mockAction("u.X.transition.effect", false)),
+			),
+		),
+
 		hsm.Final("exit"),
 		hsm.Initial(
 			hsm.Target(hsm.Choice(
@@ -186,7 +207,7 @@ func TestHSM(t *testing.T) {
 		})),
 		hsm.Transition(hsm.On("K"), hsm.Source("/s/s1/s11"), hsm.Target("/s/s3"), hsm.Effect(mockAction("s11.K.transition.effect", false))),
 		hsm.Transition(hsm.On("Z"), hsm.Effect(mockAction("Z.transition.effect", false))),
-		hsm.Transition(hsm.On("X"), hsm.Effect(mockAction("X.transition.effect", false)), hsm.Source("/s/s3"), hsm.Target("/exit")),
+		hsm.Transition(hsm.On("X"), hsm.Effect(mockAction("X.transition.effect", false)), hsm.Source("/s/s3"), hsm.Target("/t/u")),
 	)
 	sm := hsm.Start(ctx, &THSM{
 		foo: 0,
@@ -373,7 +394,6 @@ func TestHSM(t *testing.T) {
 		Name: "J",
 		Done: make(chan struct{}),
 	})
-	<-sm.Wait()
 	if sm.State() != "/s/s3" {
 		t.Fatal("state is not correct after J expected /s/s3 got", "state", sm.State())
 	}
@@ -409,11 +429,35 @@ func TestHSM(t *testing.T) {
 		Name: "X",
 		Done: make(chan struct{}),
 	})
+	if sm.State() != "/t/u" {
+		t.Fatal("state is not correct after X", "state", sm.State())
+	}
+	if !trace.matches(Trace{
+		sync: []string{"s3.exit", "s.exit", "X.transition.effect", "t.entry", "u.entry"},
+	}) {
+		t.Fatal("transition actions are not correct", "trace", trace)
+	}
+	trace.reset()
+	<-sm.Dispatch(ctx, hsm.Event{
+		Name: "u.t",
+	})
+	if sm.State() != "/t" {
+		t.Fatal("state is not correct after u.t", "state", sm.State())
+	}
+	if !trace.matches(Trace{
+		sync: []string{"u.exit", "u.t.transition.effect"},
+	}) {
+		t.Fatal("transition actions are not correct", "trace", trace)
+	}
+	trace.reset()
+	<-sm.Dispatch(ctx, hsm.Event{
+		Name: "X",
+	})
 	if sm.State() != "/exit" {
 		t.Fatal("state is not correct after X", "state", sm.State())
 	}
 	if !trace.matches(Trace{
-		sync: []string{"s3.exit", "s.exit", "X.transition.effect"},
+		sync: []string{"t.exit", "u.X.transition.effect"},
 	}) {
 		t.Fatal("transition actions are not correct", "trace", trace)
 	}
