@@ -20,13 +20,21 @@ jobs:
         id: base_version
         run: |
           git fetch origin ${{ github.base_ref }}
-          BASE_VERSION=$(git show origin/${{ github.base_ref }}:version.go | grep 'const Version = ' | cut -d'"' -f2)
+          BASE_VERSION=$(git show origin/${{ github.base_ref }}:version.go 2>/dev/null | grep 'const Version = ' | cut -d'"' -f2 || echo "")
+          if [ -z "$BASE_VERSION" ]; then
+            echo "Could not find version in base branch. Assuming initial version."
+            BASE_VERSION="v0.0.0"
+          fi
           echo "base_version=$BASE_VERSION" >> $GITHUB_OUTPUT
 
       - name: Get PR version
         id: pr_version
         run: |
           PR_VERSION=$(grep 'const Version = ' version.go | cut -d'"' -f2)
+          if [ -z "$PR_VERSION" ]; then
+            echo "Could not find version in PR branch"
+            exit 1
+          fi
           echo "pr_version=$PR_VERSION" >> $GITHUB_OUTPUT
 
       - name: Check version update
