@@ -3,8 +3,7 @@ name: Version Check
 on:
   pull_request:
     branches: [main, master]
-    paths:
-      - "version.go"
+    types: [opened, ready_for_review]
 
 jobs:
   check-version:
@@ -29,8 +28,36 @@ jobs:
 
       - name: Check version update
         run: |
-          if [ "${{ steps.base_version.outputs.base_version }}" = "${{ steps.pr_version.outputs.pr_version }}" ]; then
+          # Function to compare semantic versions
+          version_compare() {
+            local a=$1
+            local b=$2
+            local a1 a2 a3 b1 b2 b3
+            IFS='.' read -r a1 a2 a3 <<< "$a"
+            IFS='.' read -r b1 b2 b3 <<< "$b"
+            
+            if [ "$a1" -gt "$b1" ]; then return 0; fi
+            if [ "$a1" -lt "$b1" ]; then return 1; fi
+            if [ "$a2" -gt "$b2" ]; then return 0; fi
+            if [ "$a2" -lt "$b2" ]; then return 1; fi
+            if [ "$a3" -gt "$b3" ]; then return 0; fi
+            if [ "$a3" -lt "$b3" ]; then return 1; fi
+            return 1
+          }
+
+          BASE_VERSION="${{ steps.base_version.outputs.base_version }}"
+          PR_VERSION="${{ steps.pr_version.outputs.pr_version }}"
+
+          if [ "$BASE_VERSION" = "$PR_VERSION" ]; then
             echo "Version must be updated in version.go before creating a PR"
-            echo "Current version: ${{ steps.base_version.outputs.base_version }}"
+            echo "Current version: $BASE_VERSION"
+            exit 1
+          fi
+
+          if ! version_compare "$PR_VERSION" "$BASE_VERSION"; then
+            echo "Version must be incremented in version.go"
+            echo "Base version: $BASE_VERSION"
+            echo "PR version: $PR_VERSION"
+            echo "The PR version must be higher than the base version"
             exit 1
           fi

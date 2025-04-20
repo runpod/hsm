@@ -50,7 +50,7 @@ type Event struct {
 	Id   string `json:"id"`
 	Data any    `json:"data"`
 
-	// Deprecated: Use WithSignal instead.
+	// Deprecated: HSM now waits for all events by default
 	Done chan struct{} `json:"-"`
 }
 
