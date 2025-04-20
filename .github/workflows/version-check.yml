@@ -33,11 +33,22 @@ jobs:
         run: |
           # Function to compare semantic versions
           version_compare() {
-            local a=$1
-            local b=$2
+            # Remove 'v' prefix if present
+            local a=${1#v}
+            local b=${2#v}
+            
+            # Split into major.minor.patch
             local a1 a2 a3 b1 b2 b3
             IFS='.' read -r a1 a2 a3 <<< "$a"
             IFS='.' read -r b1 b2 b3 <<< "$b"
+            
+            # Convert to integers for comparison
+            a1=$((10#$a1))
+            a2=$((10#$a2))
+            a3=$((10#$a3))
+            b1=$((10#$b1))
+            b2=$((10#$b2))
+            b3=$((10#$b3))
             
             if [ "$a1" -gt "$b1" ]; then return 0; fi
             if [ "$a1" -lt "$b1" ]; then return 1; fi
