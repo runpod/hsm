@@ -1,12 +1,15 @@
 name: Version Check
 
 on:
+  push:
+    branches-ignore: [main, master]
   pull_request:
     branches: [main, master]
     types: [opened, ready_for_review]
 
 jobs:
   check-version:
+    name: Checking Version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
