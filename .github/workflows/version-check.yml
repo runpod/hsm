@@ -3,6 +3,7 @@ name: Version Check
 on:
   pull_request:
     branches: [main, master]
+    types: [opened, ready_for_review]
     paths:
       - "version.go"
 
