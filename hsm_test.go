@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -593,6 +594,47 @@ func noBehavior(ctx context.Context, hsm *THSM, event hsm.Event) {
 	}
 }
 
+func TestChoiceBackToSource(t *testing.T) {
+	actions := atomic.Value{}
+	actions.Store([]string{})
+
+	makeBehavior := func(name string) func(ctx context.Context, hsm *THSM, event hsm.Event) {
+		return func(ctx context.Context, hsm *THSM, event hsm.Event) {
+			slog.Info("behavior", "name", name)
+			actions.Store(append(actions.Load().([]string), name))
+		}
+	}
+	model := hsm.Define(
+		"TestHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo", hsm.Entry(makeBehavior("foo.entry")), hsm.Exit(makeBehavior("foo.exit")), hsm.Choice(
+			"choice",
+			hsm.Transition(
+				hsm.Target("../bar"),
+				hsm.Guard(func(ctx context.Context, hsm *THSM, event hsm.Event) bool {
+					return false
+				}),
+			),
+			hsm.Transition(hsm.Target("../foo"), hsm.Effect(makeBehavior("foo.choice.effect"))),
+		)),
+		hsm.State("bar", hsm.Entry(makeBehavior("bar.entry")), hsm.Exit(makeBehavior("bar.exit"))),
+		hsm.Transition(hsm.On("choice"), hsm.Source("foo"), hsm.Target("foo/choice")),
+	)
+	sm := hsm.Start(context.Background(), &THSM{}, &model)
+	if sm.State() != "/foo" {
+		t.Fatal("state is not correct", "state", sm.State())
+	}
+	actions.Store([]string{})
+	<-sm.Dispatch(context.Background(), hsm.Event{
+		Name: "choice",
+	})
+	if sm.State() != "/foo" {
+		t.Fatal("state is not correct", "state", sm.State())
+	}
+	slog.Info("actions", "actions", actions.Load())
+
+}
+
 func TestIsAncestor(t *testing.T) {
 	if !hsm.IsAncestor("/foo/bar", "/foo/bar/baz") {
 		t.Fatal("IsAncestor is not correct /foo/bar is an ancestor of /foo/bar/baz")
@@ -611,6 +653,32 @@ func TestIsAncestor(t *testing.T) {
 	}
 	if !hsm.IsAncestor("/foo/", "/foo/bar/baz/qux") {
 		t.Fatal("IsAncestor is not correct /foo/ is an ancestor of /foo/bar/baz/qux")
+	}
+}
+
+func TestInitialEventData(t *testing.T) {
+	type data struct {
+		foo string
+	}
+	var configData atomic.Pointer[data]
+	model := hsm.Define(
+		"TestHSM",
+		hsm.Initial(hsm.Target("foo"), hsm.Effect(func(ctx context.Context, sm *THSM, event hsm.Event) {
+			configData.Store(event.Data.(*data))
+		})),
+		hsm.State("foo"),
+		hsm.State("bar"),
+		hsm.Transition(hsm.On("foo"), hsm.Source("foo"), hsm.Target("bar")),
+		hsm.Transition(hsm.On("bar"), hsm.Source("bar"), hsm.Target("foo")),
+	)
+	ctx := context.Background()
+	hsm.Start(ctx, &THSM{}, &model, hsm.Config{
+		Data: &data{
+			foo: "testing",
+		},
+	})
+	if configData.Load().foo != "testing" {
+		t.Fatal("config data is not correct", "config data", configData.Load())
 	}
 }
 
@@ -993,4 +1061,46 @@ func TestDispatch(t *testing.T) {
 		t.Fatalf("Expected state machine to be done")
 	}
 
+}
+
+func TestPropagate(t *testing.T) {
+	model := hsm.Define(
+		"TestPropagateHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+		hsm.Transition(hsm.On("foo"), hsm.Source("foo"), hsm.Target("bar")),
+		hsm.State("bar", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+	)
+	sm1 := hsm.Start(context.Background(), &THSM{}, &model)
+	sm2 := hsm.Start(sm1.Context(), &THSM{}, &model)
+	<-hsm.Propagate(sm2.Context(), hsm.Event{Name: "foo"})
+	if sm1.State() != "/bar" {
+		t.Fatalf("Expected state to be bar, got: %s", sm1.State())
+	}
+}
+
+func TestPropagateAll(t *testing.T) {
+	model := hsm.Define(
+		"TestPropagateAllHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+		hsm.Transition(hsm.On("foo"), hsm.Source("foo"), hsm.Target("bar")),
+		hsm.State("bar", hsm.Entry(noBehavior), hsm.Exit(noBehavior)),
+	)
+	instances := make([]hsm.Instance, 10)
+	for i := 0; i < 10; i++ {
+		var ctx context.Context
+		if i == 0 {
+			ctx = context.Background()
+		} else {
+			ctx = instances[i-1].Context()
+		}
+		instances[i] = hsm.Start(ctx, &THSM{}, &model)
+	}
+	<-hsm.PropagateAll(instances[len(instances)-1].Context(), hsm.Event{Name: "foo"})
+	for i := range len(instances) - 1 {
+		if instances[i].State() != "/bar" {
+			t.Fatalf("Expected instance %d state to be bar, got: %s", i, instances[i].State())
+		}
+	}
 }
