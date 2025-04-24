@@ -8,6 +8,7 @@ import (
 	"path"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,7 +18,7 @@ import (
 
 	"github.com/runpod/hsm/elements"
 	"github.com/runpod/hsm/kind"
-	"github.com/runpod/hsm/syncmap"
+	"github.com/runpod/hsm/muid"
 )
 
 var (
@@ -109,7 +110,8 @@ type Element = elements.NamedElement
 // Model represents the complete state machine model definition.
 // It contains the root state and maintains a namespace of all elements.
 type Model struct {
-	state
+	element
+	state    state
 	members  map[string]elements.NamedElement
 	elements []RedefinableElement
 }
@@ -320,6 +322,7 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 		redefinableElements = append([]RedefinableElement{any(nameOrRedefinableElement).(RedefinableElement)}, redefinableElements...)
 	}
 	model := Model{
+		element: element{kind: kind.Namespace, qualifiedName: "/", id: name},
 		state: state{
 			vertex: vertex{element: element{kind: kind.State, qualifiedName: "/", id: name}, transitions: []string{}},
 		},
@@ -335,15 +338,16 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 		apply(&model, stack, elements...)
 	}
 
-	if model.initial == "" {
-		panic(fmt.Errorf("initial state is required for state machine %s", model.Id()))
+	if model.state.initial == "" {
+		panic(fmt.Errorf("initial state is required for state machine %s", model.state.id))
 	}
-	if len(model.entry) > 0 {
-		panic(fmt.Errorf("entry actions are not allowed on top level state machine %s", model.Id()))
+	if len(model.state.entry) > 0 {
+		panic(fmt.Errorf("entry actions are not allowed on top level state machine %s", model.state.id))
 	}
-	if len(model.exit) > 0 {
-		panic(fmt.Errorf("exit actions are not allowed on top level state machine %s", model.Id()))
+	if len(model.state.exit) > 0 {
+		panic(fmt.Errorf("exit actions are not allowed on top level state machine %s", model.state.id))
 	}
+	model.qualifiedName = name
 	return model
 }
 
@@ -388,27 +392,6 @@ func getFunctionName(fn any) string {
 	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }
 
-var counter atomic.Uint64
-
-const (
-	idTimestampBits = 48
-	idCounterBits   = 16 // 64 - timestampBits
-	idTimestampMask = uint64((1 << idTimestampBits) - 1)
-	idCounterMask   = uint64((1 << idCounterBits) - 1)
-)
-
-// id generates a uint64 ID with configurable bits for timestamp
-// timestampBits must be between 1 and 63
-func id() string {
-	// Get timestamp and truncate to specified bits
-	timestamp := uint64(time.Now().UnixMilli()) & idTimestampMask
-	// Get count and truncate to remaining bits
-	counter := counter.Add(1) & idCounterMask
-
-	// Combine timestamp and counter
-	return strconv.FormatUint((timestamp<<idCounterBits)|counter, 32)
-}
-
 func hasWildcard(events ...Event) bool {
 	for _, event := range events {
 		if strings.Contains(event.Name, "*") {
@@ -437,7 +420,7 @@ func hasWildcard(events ...Event) bool {
 func State(name string, partialElements ...RedefinableElement) RedefinableElement {
 	traceback := traceback()
 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
-		owner := find(stack, kind.StateMachine, kind.State)
+		owner := find(stack, kind.Namespace)
 		if owner == nil {
 			traceback(fmt.Errorf("state \"%s\" must be called within Define() or State()", name))
 		}
@@ -626,7 +609,7 @@ func Transition[T interface{ RedefinableElement | string }](nameOrPartialElement
 				}
 				// precompute transition paths for the source state and nested states
 				for qualifiedName, element := range model.members {
-					if strings.HasPrefix(qualifiedName, transition.source) && kind.IsKind(element.Kind(), kind.Vertex, kind.StateMachine) {
+					if strings.HasPrefix(qualifiedName, transition.source) && kind.IsKind(element.Kind(), kind.Vertex) {
 						exit := []string{}
 						if transition.kind != kind.Internal {
 							exiting := element.QualifiedName()
@@ -1184,7 +1167,7 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 					for {
 						select {
 						case <-timer.C:
-							<-hsm.Dispatch(ctx, event.WithDone(make(chan struct{})))
+							<-hsm.Dispatch(ctx, event)
 							timer.Reset(duration)
 						case <-ctx.Done():
 							return
@@ -1216,7 +1199,7 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 func Final(name string) RedefinableElement {
 	traceback := traceback()
 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
-		owner := find(stack, kind.StateMachine, kind.State)
+		owner := find(stack, kind.Namespace)
 		if owner == nil {
 			traceback(fmt.Errorf("final \"%s\" must be called within Define() or State()", name))
 		}
@@ -1336,8 +1319,7 @@ type timeouts struct {
 
 type mutex struct {
 	internal sync.Mutex
-
-	signal atomic.Value
+	signal   atomic.Value
 }
 
 func (mutex *mutex) lock() {
@@ -1375,8 +1357,7 @@ type hsm[T Instance] struct {
 	trace      Trace
 	timeouts   timeouts
 	processing mutex
-	// mutex      sync.RWMutex
-	logger Logger
+	logger     Logger
 }
 
 // Trace is a function type for tracing state machine execution.
@@ -1403,11 +1384,11 @@ type Config struct {
 type key[T any] struct{}
 
 var Keys = struct {
-	All key[*syncmap.SyncMap[string, Instance]]
-	HSM key[HSM]
+	Instances key[*atomic.Pointer[[]Instance]]
+	HSM       key[HSM]
 }{
-	All: key[*syncmap.SyncMap[string, Instance]]{},
-	HSM: key[HSM]{},
+	Instances: key[*atomic.Pointer[[]Instance]]{},
+	HSM:       key[HSM]{},
 }
 
 func Match(state string, patterns ...string) bool {
@@ -1538,7 +1519,7 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 		initialEvent = initialEvent.WithData(config[0].Data)
 	}
 	if hsm.id == "" {
-		hsm.id = id()
+		hsm.id = muid.Make().String()
 	}
 	if hsm.qualifiedName == "" {
 		hsm.qualifiedName = model.QualifiedName()
@@ -1566,13 +1547,20 @@ func (sm *hsm[T]) State() string {
 }
 
 func (sm *hsm[T]) start(instance Instance, event *Event) {
-	all, ok := sm.context.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
+	all, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
 	if !ok {
-		all = &syncmap.SyncMap[string, Instance]{}
+		all = &atomic.Pointer[[]Instance]{}
+		all.Store(&[]Instance{})
 	}
-	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.All, all), Keys.HSM, sm), sm)
+	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.Instances, all), Keys.HSM, sm), sm)
 	sm.context = ctx
-	all.Store(sm.id, sm)
+	for {
+		allInstances := all.Load()
+		instances := append(*allInstances, sm)
+		if all.CompareAndSwap(allInstances, &instances) {
+			break
+		}
+	}
 	sm.execute(sm.context, &sm.behavior, event)
 }
 
@@ -1621,7 +1609,7 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			active.cancel()
 		}
 		clear(sm.active)
-		if all, ok := sm.context.Value(Keys.All).(*sync.Map); ok {
+		if all, ok := sm.context.Value(Keys.Instances).(*sync.Map); ok {
 			all.Delete(sm.id)
 		}
 		close(done)
@@ -1679,7 +1667,7 @@ func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *
 		}
 		sm.active[qualifiedName] = current
 	}
-	current.subcontext, current.cancel = context.WithCancel(context.WithValue(ctx, &sm.active, element))
+	current.subcontext, current.cancel = context.WithCancel(ctx)
 	return current
 }
 
@@ -1771,6 +1759,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 		ctx, end = sm.trace(ctx, sm, "execute", element, event)
 		defer end()
 	}
+
 	switch element.Kind() {
 	case kind.Concurrent:
 		ctx := sm.activate(sm.context, element)
@@ -1926,6 +1915,9 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			}
 			if transition := sm.enabled(ctx, source, &event); transition != nil {
 				state := sm.transition(ctx, currentState, transition, &event)
+				if state == nil {
+					break
+				}
 				sm.state.Store(state)
 				break
 			}
@@ -1977,19 +1969,16 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 //	done := sm.Dispatch(hsm.Event{Name: "start"})
 //	<-done // Wait for event processing to complete
 func Dispatch[T context.Context](ctx T, event Event) <-chan struct{} {
-	// avoid indirection if we already have an instance
-	switch c := any(ctx).(type) {
-	case Instance:
-		return c.Dispatch(ctx, event)
-	default:
-		if hsm, ok := FromContext(ctx); ok {
-			return hsm.Dispatch(ctx, event)
-		}
-		return done(event.Done)
+	// get the hsm from the context
+	if hsm, ok := FromContext(ctx); ok {
+		// dispatch the event to the hsm
+		return hsm.Dispatch(ctx, event)
 	}
-
+	return closedChannel
 }
 
+// DispatchAll sends an event to all state machine instances in the current context.
+// Returns a channel that closes when all instances have processed the event.
 // DispatchAll sends an event to all state machine instances in the current context.
 // Returns a channel that closes when all instances have processed the event.
 //
@@ -2004,36 +1993,92 @@ func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
 }
 
 func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan struct{} {
-	all, ok := ctx.Value(Keys.All).(*syncmap.SyncMap[string, Instance])
-	if !ok {
+	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
+	if !ok || instancesPointer == nil {
 		return closedChannel
 	}
 	signal := make(chan struct{})
-	if !ok {
+	instances := instancesPointer.Load()
+	if instances == nil {
 		close(signal)
 		return signal
 	}
 	go func(signal chan struct{}) {
-		defer done(signal)
-		signals := []<-chan struct{}{}
-		all.Range(func(id string, sm Instance) bool {
-			if len(maybeIds) == 0 || Match(id, maybeIds...) {
-				if signal != nil {
-					signals = append(signals, sm.Dispatch(ctx, event))
-				} else {
-					sm.Dispatch(ctx, event)
-				}
+		defer close(signal)
+		signals := make(map[int]<-chan struct{}, len(*instances))
+		for i, sm := range *instances {
+			if len(maybeIds) == 0 || Match(sm.Id(), maybeIds...) {
+				signals[i] = sm.Dispatch(ctx, event)
 			}
-			return true
-		})
-		for _, ch := range signals {
-			select {
-			case <-ch:
-			case <-ctx.Done():
-				return
+		}
+		for len(signals) > 0 {
+			for i, ch := range signals {
+				select {
+				case <-ch:
+					delete(signals, i)
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 	}(signal)
+	return signal
+}
+
+func Propagate(ctx context.Context, event Event) <-chan struct{} {
+	hsm, ok := FromContext(ctx)
+	if !ok {
+		return closedChannel
+	}
+	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
+	if !ok || instancesPointer == nil {
+		return closedChannel
+	}
+	instances := instancesPointer.Load()
+	if instances == nil {
+		return closedChannel
+	}
+	index := slices.Index(*instances, hsm)
+	if index == -1 || index == 0 {
+		return closedChannel
+	}
+	return (*instances)[index-1].Dispatch(ctx, event)
+}
+
+func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
+	hsm, ok := FromContext(ctx)
+	if !ok {
+		return closedChannel
+	}
+	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
+	if !ok || instancesPointer == nil {
+		return closedChannel
+	}
+	instances := instancesPointer.Load()
+	if instances == nil {
+		return closedChannel
+	}
+	signal := make(chan struct{})
+	go func() {
+		defer close(signal)
+		signals := make(map[int]<-chan struct{}, len(*instances))
+		for i, instance := range *instances {
+			if instance == hsm {
+				break
+			}
+			signals[i] = instance.Dispatch(ctx, event)
+		}
+		for len(signals) > 0 {
+			for i, ch := range signals {
+				select {
+				case <-ch:
+					delete(signals, i)
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
 	return signal
 }
 
@@ -2051,20 +2096,4 @@ func FromContext(ctx context.Context) (Instance, bool) {
 		return hsm, true
 	}
 	return nil, false
-}
-
-func done(channel chan struct{}) <-chan struct{} {
-	if channel == nil {
-		return noevent.Done
-	}
-	select {
-	case _, ok := <-channel:
-		if !ok {
-			// Channel is closed, return it without modification
-			return channel
-		}
-	default:
-		close(channel)
-	}
-	return channel
 }
