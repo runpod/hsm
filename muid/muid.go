@@ -67,15 +67,7 @@ type MUID uint64
 // String returns the base32 encoded string representation of the MUID,
 // zero-padded to 13 characters.
 func (m MUID) String() string {
-	var buf [13]byte
-	str := strconv.FormatUint(uint64(m), 32)
-	pad := 13 - len(str)
-
-	for i := range pad {
-		buf[i] = '0'
-	}
-	copy(buf[pad:], str)
-	return string(buf[:])
+	return strconv.FormatUint(uint64(m), 32)
 }
 
 // Generator is responsible for generating MUIDs.
@@ -125,6 +117,7 @@ func NewGenerator(config Config) *Generator {
 		generator.machineID = defaultConfig.MachineID
 	}
 	generator.machineID = generator.machineID & ((1 << generator.machineBitLen) - 1)
+	generator.state.Store(1)
 	return generator
 }
 
@@ -139,7 +132,7 @@ func (g *Generator) ID() MUID {
 		previousState := g.state.Load()
 		// Extract last timestamp and counter from the packed state.
 		lastTimestamp := previousState >> g.counterBitLen
-		counter := previousState & g.counterBitMask
+		counter := (previousState & g.counterBitMask)
 
 		// Protect against clock moving backwards.
 		if now < lastTimestamp {
@@ -151,14 +144,14 @@ func (g *Generator) ID() MUID {
 			if counter >= g.counterBitMask {
 				// Counter overflowed, increment the timestamp virtually.
 				now++
-				counter = 0 // Reset counter for the new virtual millisecond
+				counter = 1 // Reset counter for the new virtual millisecond
 			} else {
 				// Increment counter within the same millisecond.
 				counter++
 			}
 		} else {
 			// New millisecond, reset the counter.
-			counter = 0
+			counter = 1
 		}
 
 		// Pack the new timestamp and counter into the state.
