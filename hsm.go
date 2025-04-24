@@ -1906,6 +1906,9 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
+		if event.Id == "" {
+			event.Id = muid.Make().String()
+		}
 		currentState := sm.state.Load().(elements.NamedElement)
 		qualifiedName := currentState.QualifiedName()
 		for qualifiedName != "" {
@@ -1947,6 +1950,7 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	if event.Kind == 0 {
 		event.Kind = kind.Event
 	}
+
 	if sm.trace != nil {
 		var end func(...any)
 		ctx, end = sm.trace(ctx, sm, "dispatch", event)
