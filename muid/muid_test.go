@@ -26,6 +26,17 @@ func TestMUID(t *testing.T) {
 	}
 }
 
+func TestMUIDStringLength(t *testing.T) {
+	const total = 1_000_000
+	length := len(muid.Make().String())
+	for i := 0; i < total; i++ {
+		muid := muid.Make()
+		if len(muid.String()) != length {
+			t.Fatalf("muid string length is not %d: %d", length, len(muid.String()))
+		}
+	}
+}
+
 func BenchmarkMuid(b *testing.B) {
 	b.Run("muid", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
