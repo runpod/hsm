@@ -5,7 +5,7 @@ This package provides a generator for **M**icro **U**niversal **ID**s (MUIDs). M
 ## Features
 
 - **Unique & Sortable:** Generates unique IDs that are approximately ordered by time.
-- **High Performance:** Optimized for generating large numbers of IDs quickly.
+- **High Performance:** Optimized for generating large numbers of IDs quickly, utilizing CPU-based sharding for excellent parallel performance.
 - **Concurrency Safe:** Safe for use across multiple goroutines.
 - **Configurable:** Allows customization of bit lengths for timestamp, machine ID, and counter, as well as the epoch and machine ID itself via a `Config` struct.
 
@@ -14,16 +14,27 @@ This package provides a generator for **M**icro **U**niversal **ID**s (MUIDs). M
 Each 64-bit MUID is composed of:
 
 - **Timestamp (41 bits):** Milliseconds since a custom epoch (`1700000000000` - Nov 14, 2023 22:13:20 GMT), allowing for ~69 years of IDs.
-- **Machine ID (14 bits):** Identifier for the machine generating the ID, allowing for 16,384 unique machines.
-- **Counter (9 bits):** Sequence number within the same millisecond on the same machine, allowing for 512 unique IDs per millisecond per machine.
+- **Machine ID (Variable bits):** Identifier for the machine generating the ID.
+- **Shard ID (Variable bits):** Identifier for the specific generator shard within the machine (based on `runtime.NumCPU()`).
+- **Counter (9 bits):** Sequence number within the same millisecond on the same machine/shard combination, allowing for 512 unique IDs per millisecond per shard.
 
-_Note: The bit allocation for timestamp, machine ID, and counter can be customized._
+**Default Bit Allocation Breakdown:**
+
+The default configuration uses 41 bits for the timestamp and 9 bits for the counter.
+The remaining 14 bits (`64 - 41 - 9 = 14`) are dynamically divided between the Machine ID and the Shard ID:
+
+1.  **Shard Bits:** The number of bits needed for the Shard ID is calculated based on the number of CPU cores: `shardBits = ceil(log2(runtime.NumCPU()))`. For example, on an 8-core machine, `shardBits = 3`. On a 1-core machine, `shardBits = 0`.
+2.  **Machine Bits:** The remaining bits are used for the Machine ID: `machineBits = 14 - shardBits`. On an 8-core machine, this would be `14 - 3 = 11` bits, allowing for 2048 unique machine IDs per timestamp/counter/shard combination.
+
+This sharding allows the default `Make()` function to achieve high throughput in parallel scenarios by reducing contention.
+
+_Note: The bit allocation for timestamp and counter can still be customized via `Config`, which will affect the total bits available for Machine ID + Shard ID._
 
 ## Usage
 
-### Default Generator
+### Default Generator (Recommended)
 
-The simplest way to generate an ID is to use the default generator. It uses the default configuration (41 bits timestamp, 14 bits machine ID, 9 bits counter) and automatically determines a machine ID based on the hostname (or a random value if the hostname is unavailable).
+The simplest and recommended way to generate an ID is to use the `Make()` function. It utilizes the default configuration and automatically manages a pool of sharded generators based on `runtime.NumCPU()` for optimal performance.
 
 ```go
 import (
@@ -32,7 +43,7 @@ import (
 )
 
 func main() {
-	// Generate a new MUID using the default generator
+	// Generate a new MUID using the default sharded generators
 	id := muid.Make()
 
 	fmt.Printf("Generated MUID: %s\n", id) // Outputs the base32 representation
@@ -42,7 +53,7 @@ func main() {
 
 ### Custom Generator
 
-You can customize the generator's behavior by providing a `Config` struct. This allows you to specify the bit lengths for the timestamp, machine ID, and counter, a custom epoch, and a specific machine ID.
+While `Make()` is generally preferred, you can create individual generator instances if you need fine-grained control or custom configurations. Note that the `NewGenerator` function now requires parameters related to sharding, even if you only intend to create a single instance.
 
 ```go
 import (
@@ -56,13 +67,19 @@ func main() {
 	config := muid.Config{
 		MachineID:       123,              // Assign a specific machine ID
 		TimestampBitLen: 42,              // Use 42 bits for timestamp
-		CounterBitLen:   10,              // Use 10 bits for counter (machine ID will be 12 bits)
+		CounterBitLen:   10,              // Use 10 bits for counter
 		Epoch:           time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixMilli(), // Custom epoch
 	}
 
-	// Create a generator with the custom configuration
-	// The provided MachineID (123) will be masked to fit the calculated machine bit length (64 - 42 - 10 = 12 bits).
-	gen := muid.NewGenerator(config)
+	// For a single custom generator instance, typically use shardIndex 0 and shardBitLen 0.
+	// The total bits available for Machine ID are 64 - TimestampBitLen - CounterBitLen - ShardBitLen
+	// In this case: 64 - 42 - 10 - 0 = 12 bits.
+	shardIndex := uint64(0)
+	shardBitLen := 0
+
+	// Create a generator with the custom configuration and shard info.
+	// The provided MachineID (123) will be masked to fit the calculated machine bit length (12 bits).
+	gen := muid.NewGenerator(config, shardIndex, shardBitLen)
 
 	// Generate an ID using the custom generator
 	id := gen.ID()
@@ -74,7 +91,8 @@ func main() {
 
 ## Notes
 
-- The default machine ID generation uses a hash of the hostname masked to the available machine ID bits (14 by default).
-- If a custom `MachineID` is provided in the `Config`, it will be masked to fit the calculated machine bit length (64 - TimestampBitLen - CounterBitLen).
-- The generator handles counter rollover within the same millisecond by incrementing the timestamp component, ensuring uniqueness even under high burst load.
-- The implementation guarantees monotonically increasing timestamps. Even if the system clock goes backward, the generator will continue issuing IDs with timestamps based on the last known highest time, ensuring IDs remain sortable by time.
+- The default machine ID calculation (used by `Make()`) uses a hash of the hostname masked to the available _machine ID bits_ (which depend on CPU count as described above).
+- If a custom `MachineID` is provided in the `Config` to `NewGenerator`, it will be masked to fit the calculated machine bit length (`64 - TimestampBitLen - CounterBitLen - ShardBitLen`).
+- The generator handles counter rollover within the same millisecond by incrementing the timestamp component, ensuring uniqueness even under high burst load per shard.
+- The implementation guarantees monotonically increasing timestamps per generator instance. Even if the system clock goes backward, the generator will continue issuing IDs with timestamps based on the last known highest time, ensuring IDs remain sortable by time within that generator's sequence.
+- The `Make()` function distributes load across internal generator shards using atomic round-robin selection.

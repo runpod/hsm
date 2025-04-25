@@ -1228,20 +1228,6 @@ func Final(name string) RedefinableElement {
 	}
 }
 
-// Log logs a message at a given level for a given instance.
-//
-// Example:
-//
-//	hsm.State("process",
-//	    hsm.Entry(hsm.Log(slog.LevelInfo, "Entering state process")),
-//	    )
-func Log[T Instance](level slog.Level, msg string, args ...any) func(ctx context.Context, instance T, event Event) {
-	return func(ctx context.Context, instance T, event Event) {
-		args := append([]any{"id", instance.Id(), "name", instance.Name(), "state", instance.State(), "event", event}, args...)
-		instance.Log(instance.Context(), level, msg, args...)
-	}
-}
-
 // func Attribute(name string, maybeDefaultValue ...any) RedefinableElement {
 // 	traceback := traceback()
 // 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
@@ -1260,25 +1246,23 @@ func Log[T Instance](level slog.Level, msg string, args ...any) func(ctx context
 // 	}
 // }
 
-type Logger interface {
-	Log(ctx context.Context, level slog.Level, msg string, args ...any)
-}
-
 // Instance represents an active state machine instance that can process events and track state.
 // It provides methods for event dispatch and state management.
 type Instance interface {
-	Element
-	Logger
 	// State returns the current state's qualified name.
 	State() string
 	Context() context.Context
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
 	Dispatch(ctx context.Context, event Event) <-chan struct{}
-	Wait(ctx context.Context) <-chan struct{}
-	QueueLen() int
-	Stop(ctx context.Context) <-chan struct{}
-	Restart(ctx context.Context)
-	start(Instance, *Event)
+
+	// non exported
+	id() string
+	qualifiedName() string
+	name() string
+	wait(ctx context.Context) <-chan struct{}
+	start(ctx context.Context, instance Instance, event *Event)
+	stop(ctx context.Context) <-chan struct{}
+	restart(ctx context.Context, maybeData ...any) <-chan struct{}
 }
 
 // Deprecated: Use Instance instead. Context will be removed in a future version.
@@ -1293,16 +1277,19 @@ type Context = Instance
 //	    hsm.HSM
 //	    counter int
 //	}
+
+type instance = Instance
+
 type HSM struct {
-	Instance
+	instance
 }
 
-func (hsm *HSM) start(instance Instance, event *Event) {
-	if hsm == nil || hsm.Instance != nil {
+func (hsm *HSM) start(ctx context.Context, instance Instance, event *Event) {
+	if hsm == nil || hsm.instance != nil {
 		return
 	}
-	hsm.Instance = instance
-	instance.start(hsm, event)
+	hsm.instance = instance
+	instance.start(ctx, hsm, event)
 }
 
 type subcontext = context.Context
@@ -1347,36 +1334,25 @@ func (mutex *mutex) tryLock() bool {
 }
 
 type hsm[T Instance] struct {
-	behavior[T]
+	behavior   behavior[T]
 	context    context.Context
 	state      atomic.Value
 	model      *Model
 	active     map[string]*active
 	queue      queue
 	instance   T
-	trace      Trace
 	timeouts   timeouts
 	processing mutex
-	logger     Logger
 }
-
-// Trace is a function type for tracing state machine execution.
-// It receives the current context, a step description, and optional data.
-// It returns a modified context and a completion function.
-type Trace func(ctx context.Context, sm Instance, step string, data ...any) (context.Context, func(...any))
 
 // Config provides configuration options for state machine initialization.
 type Config struct {
-	// Trace is a function that receives state machine execution events for debugging or monitoring.
-	Trace Trace
 	// Id is a unique identifier for the state machine instance.
 	Id string
-	// TerminateTimeout is the timeout for the state activity to terminate.
-	TerminateTimeout time.Duration
+	// ActivityTimeout is the timeout for the state activity to terminate.
+	ActivityTimeout time.Duration
 	// Name is the name of the state machine.
 	Name string
-	// Logger is a logger for the state machine.
-	Logger Logger
 	// Data to be passed during initialization
 	Data any
 }
@@ -1511,27 +1487,25 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 	initialEvent := InitialEvent
 	hsm.processing.lock()
 	if len(config) > 0 {
-		hsm.trace = config[0].Trace
-		hsm.id = config[0].Id
-		hsm.timeouts.terminate = config[0].TerminateTimeout
-		hsm.qualifiedName = config[0].Name
-		hsm.logger = config[0].Logger
+		hsm.behavior.id = config[0].Id
+		hsm.timeouts.terminate = config[0].ActivityTimeout
+		hsm.behavior.qualifiedName = config[0].Name
 		initialEvent = initialEvent.WithData(config[0].Data)
 	}
-	if hsm.id == "" {
-		hsm.id = muid.Make().String()
+	if hsm.behavior.id == "" {
+		hsm.behavior.id = muid.Make().String()
 	}
-	if hsm.qualifiedName == "" {
-		hsm.qualifiedName = model.QualifiedName()
+	if hsm.behavior.qualifiedName == "" {
+		hsm.behavior.qualifiedName = model.QualifiedName()
 	}
 	if hsm.timeouts.terminate == 0 {
 		hsm.timeouts.terminate = time.Millisecond
 	}
-	hsm.operation = func(ctx context.Context, _ T, event Event) {
+	hsm.behavior.operation = func(ctx context.Context, _ T, event Event) {
 		hsm.state.Store(hsm.enter(ctx, &hsm.model.state, &event, true))
 		hsm.process(ctx)
 	}
-	sm.start(hsm, &initialEvent)
+	sm.start(ctx, hsm, &initialEvent)
 	return sm
 }
 
@@ -1546,13 +1520,13 @@ func (sm *hsm[T]) State() string {
 	return state.QualifiedName()
 }
 
-func (sm *hsm[T]) start(instance Instance, event *Event) {
+func (sm *hsm[T]) start(_ context.Context, instance Instance, event *Event) {
 	all, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
 	if !ok {
 		all = &atomic.Pointer[[]Instance]{}
 		all.Store(&[]Instance{})
 	}
-	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.Instances, all), Keys.HSM, sm), sm)
+	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.Instances, all), Keys.HSM, sm), &sm.behavior)
 	sm.context = ctx
 	for {
 		allInstances := all.Load()
@@ -1564,27 +1538,28 @@ func (sm *hsm[T]) start(instance Instance, event *Event) {
 	sm.execute(sm.context, &sm.behavior, event)
 }
 
-func (sm *hsm[T]) Restart(ctx context.Context) {
-	<-sm.Stop(ctx)
+func (sm *hsm[T]) restart(ctx context.Context, maybeData ...any) <-chan struct{} {
+	var data any
+	if len(maybeData) > 0 {
+		data = maybeData[0]
+	}
+	<-sm.stop(ctx)
 	sm.processing.lock()
-	(*hsm[T])(sm).start(sm, &InitialEvent)
+	initialEvent := InitialEvent.WithData(data)
+	(*hsm[T])(sm).start(ctx, sm, &initialEvent)
+	return sm.wait(ctx)
 }
 
-func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
+func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 	if sm == nil {
 		return closedChannel
 	}
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "stop", sm.state)
-		defer end()
-	}
-	done := make(chan struct{})
+	signal := make(chan struct{})
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				sm.Log(ctx, slog.LevelError, "panic in stop: %s", r)
-				close(done)
+				slog.Default().Error("panic in stop", "error", r)
+				close(signal)
 			}
 		}()
 		sm.processing.lock()
@@ -1605,24 +1580,29 @@ func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
-		if active, ok := sm.active[sm.QualifiedName()]; ok {
+		if active, ok := sm.active[sm.behavior.qualifiedName]; ok {
 			active.cancel()
 		}
 		clear(sm.active)
-		if all, ok := sm.context.Value(Keys.Instances).(*sync.Map); ok {
-			all.Delete(sm.id)
+		if instancesPointer, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance]); ok {
+			deleteFunc := func(instance Instance) bool {
+				return instance == sm
+			}
+			for {
+				allInstances := instancesPointer.Load()
+				if allInstances == nil {
+					break
+				}
+				instances := slices.DeleteFunc(*allInstances, deleteFunc)
+				if instancesPointer.CompareAndSwap(allInstances, &instances) {
+					break
+				}
+			}
 		}
-		close(done)
+		close(signal)
 		sm.processing.unlock()
 	}()
-	return done
-}
-
-func (sm *hsm[T]) Log(ctx context.Context, level slog.Level, msg string, args ...any) {
-	if sm == nil || sm.logger == nil {
-		return
-	}
-	sm.logger.Log(ctx, level, msg, args...)
+	return signal
 }
 
 func (sm *hsm[T]) Context() context.Context {
@@ -1632,27 +1612,11 @@ func (sm *hsm[T]) Context() context.Context {
 	return sm.context
 }
 
-func (sm *hsm[T]) Wait(ctx context.Context) <-chan struct{} {
+func (sm *hsm[T]) wait(ctx context.Context) <-chan struct{} {
 	if sm == nil {
 		return closedChannel
 	}
 	return sm.processing.wait()
-}
-
-// Stop gracefully stops a state machine instance.
-// It cancels any running activities and prevents further event processing.
-//
-// Example:
-//
-//	sm := hsm.Start(...)
-//	// ... use state machine ...
-//	hsm.Stop(sm)
-func Stop(ctx context.Context) {
-	hsm, ok := FromContext(ctx)
-	if !ok {
-		return
-	}
-	hsm.Stop(ctx)
 }
 
 func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *active {
@@ -1674,11 +1638,6 @@ func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *
 func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, event *Event, defaultEntry bool) elements.NamedElement {
 	if sm == nil {
 		return nil
-	}
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "enter", element)
-		defer end()
 	}
 	switch element.Kind() {
 	case kind.State:
@@ -1718,7 +1677,7 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 		}
 	case kind.FinalState:
 		if element.Owner() == "/" {
-			sm.terminate(ctx, sm)
+			sm.terminate(ctx, &sm.behavior)
 		}
 		return element
 	}
@@ -1728,11 +1687,6 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 func (sm *hsm[T]) exit(ctx context.Context, element elements.NamedElement, event *Event) {
 	if sm == nil || element == nil {
 		return
-	}
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "exit", element)
-		defer end()
 	}
 	if state, ok := element.(*state); ok {
 		for _, activity := range state.activities {
@@ -1753,20 +1707,11 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 	if sm == nil || element == nil {
 		return
 	}
-	var end func(...any)
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "execute", element, event)
-		defer end()
-	}
 
 	switch element.Kind() {
 	case kind.Concurrent:
 		ctx := sm.activate(sm.context, element)
-		go func(ctx *active, end func(...any), event Event) {
-			if end != nil {
-				defer end()
-			}
+		go func(ctx *active, event Event) {
 			defer func() {
 				if r := recover(); r != nil {
 					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
@@ -1774,7 +1719,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 			}()
 			element.operation(ctx, sm.instance, event)
 			ctx.channel <- struct{}{}
-		}(ctx, end, *event)
+		}(ctx, *event)
 	default:
 		element.operation(ctx, sm.instance, *event)
 	}
@@ -1784,11 +1729,6 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 func (sm *hsm[T]) evaluate(ctx context.Context, guard *constraint[T], event *Event) bool {
 	if sm == nil || guard == nil || guard.expression == nil {
 		return true
-	}
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "evaluate", guard, event)
-		defer end()
 	}
 	return guard.expression(
 		ctx,
@@ -1800,11 +1740,6 @@ func (sm *hsm[T]) evaluate(ctx context.Context, guard *constraint[T], event *Eve
 func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement, transition *transition, event *Event) elements.NamedElement {
 	if sm == nil {
 		return nil
-	}
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "transition", current, transition, event)
-		defer end()
 	}
 	path, ok := transition.paths[current.QualifiedName()]
 	if !ok {
@@ -1846,10 +1781,6 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) {
 	if sm == nil || element == nil {
 		return
-	}
-	if sm.trace != nil {
-		_, end := sm.trace(ctx, sm, "terminate", element)
-		defer end()
 	}
 	active, ok := sm.active[element.QualifiedName()]
 	if !ok {
@@ -1898,16 +1829,11 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	if sm == nil {
 		return
 	}
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "process")
-		defer end()
-	}
 	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
-		if event.Id == "" {
-			event.Id = muid.Make().String()
+		if event.Id == 0 {
+			event.Id = muid.Make()
 		}
 		currentState := sm.state.Load().(elements.NamedElement)
 		qualifiedName := currentState.QualifiedName()
@@ -1950,18 +1876,24 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	if event.Kind == 0 {
 		event.Kind = kind.Event
 	}
-
-	if sm.trace != nil {
-		var end func(...any)
-		ctx, end = sm.trace(ctx, sm, "dispatch", event)
-		defer end()
-	}
 	sm.queue.push(event)
 	if sm.processing.tryLock() {
 		go sm.process(ctx)
 		return sm.processing.wait()
 	}
 	return sm.processing.wait()
+}
+
+func (sm *hsm[T]) id() string {
+	return sm.behavior.id
+}
+
+func (sm *hsm[T]) qualifiedName() string {
+	return sm.behavior.qualifiedName
+}
+
+func (sm *hsm[T]) name() string {
+	return sm.behavior.Name()
 }
 
 // Dispatch sends an event to a specific state machine instance.
@@ -2011,7 +1943,7 @@ func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan str
 		defer close(signal)
 		signals := make(map[int]<-chan struct{}, len(*instances))
 		for i, sm := range *instances {
-			if len(maybeIds) == 0 || Match(sm.Id(), maybeIds...) {
+			if len(maybeIds) == 0 || Match(sm.id(), maybeIds...) {
 				signals[i] = sm.Dispatch(ctx, event)
 			}
 		}
@@ -2100,4 +2032,40 @@ func FromContext(ctx context.Context) (Instance, bool) {
 		return hsm, true
 	}
 	return nil, false
+}
+
+func InstancesFromContext(ctx context.Context) ([]Instance, bool) {
+	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
+	if !ok || instancesPointer == nil {
+		return nil, false
+	}
+	return *instancesPointer.Load(), true
+}
+
+// Stop gracefully stops a state machine instance.
+// It cancels any running activities and prevents further event processing.
+//
+// Example:
+//
+//	sm := hsm.Start(...)
+//	// ... use state machine ...
+//	hsm.Stop(sm)
+func Stop(ctx context.Context, hsm Instance) <-chan struct{} {
+	return hsm.stop(ctx)
+}
+
+func Restart(ctx context.Context, hsm Instance, maybeData ...any) <-chan struct{} {
+	return hsm.restart(ctx, maybeData...)
+}
+
+func Id(hsm Instance) string {
+	return hsm.id()
+}
+
+func QualifiedName(hsm Instance) string {
+	return hsm.qualifiedName()
+}
+
+func Name(hsm Instance) string {
+	return hsm.name()
 }
