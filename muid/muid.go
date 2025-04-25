@@ -97,6 +97,7 @@ var (
 
 	// Keep defaultConfig for NewGenerator defaults
 	defaultConfig = DefaultConfig()
+	shards        = defaultShards()
 )
 
 type Config struct {
@@ -233,7 +234,6 @@ func (g *Generator) ID() MUID {
 // Make generates a new MUID using the default sharded generators.
 // It distributes load across generators for better parallel performance.
 func Make() MUID {
-	shards := defaultShards()
 	// Atomically get the next index in a round-robin fashion.
 	idx := shards.idx.Add(1) % shards.size
 	return shards.pool[idx].ID()
