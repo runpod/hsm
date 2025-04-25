@@ -1274,11 +1274,11 @@ type Instance interface {
 	Context() context.Context
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
 	Dispatch(ctx context.Context, event Event) <-chan struct{}
-	Wait(ctx context.Context) <-chan struct{}
-	QueueLen() int
-	Stop(ctx context.Context) <-chan struct{}
-	Restart(ctx context.Context)
+	// Wait(ctx context.Context) <-chan struct{}
+	// QueueLen() int
 	start(Instance, *Event)
+	stop(ctx context.Context) <-chan struct{}
+	restart(ctx context.Context)
 }
 
 // Deprecated: Use Instance instead. Context will be removed in a future version.
@@ -1564,13 +1564,13 @@ func (sm *hsm[T]) start(instance Instance, event *Event) {
 	sm.execute(sm.context, &sm.behavior, event)
 }
 
-func (sm *hsm[T]) Restart(ctx context.Context) {
-	<-sm.Stop(ctx)
+func (sm *hsm[T]) restart(ctx context.Context) {
+	<-sm.stop(ctx)
 	sm.processing.lock()
 	(*hsm[T])(sm).start(sm, &InitialEvent)
 }
 
-func (sm *hsm[T]) Stop(ctx context.Context) <-chan struct{} {
+func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 	if sm == nil {
 		return closedChannel
 	}
@@ -1647,12 +1647,8 @@ func (sm *hsm[T]) Wait(ctx context.Context) <-chan struct{} {
 //	sm := hsm.Start(...)
 //	// ... use state machine ...
 //	hsm.Stop(sm)
-func Stop(ctx context.Context) {
-	hsm, ok := FromContext(ctx)
-	if !ok {
-		return
-	}
-	hsm.Stop(ctx)
+func Stop(ctx context.Context, hsm Instance) <-chan struct{} {
+	return hsm.stop(ctx)
 }
 
 func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *active {

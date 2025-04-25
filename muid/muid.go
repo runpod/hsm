@@ -32,29 +32,14 @@ type shardedGenerators struct {
 var (
 	DefaultConfig = sync.OnceValue(func() Config {
 		config := Config{
-			TimestampBitLen: 41,
-			CounterBitLen:   9,
+			TimestampBitLen: 40,
+			MachineIDBitLen: 14,
 			Epoch:           1700000000000,
-		}
-
-		// Determine bits needed for sharding based on CPU count
-		numCPU := runtime.NumCPU()
-		if numCPU <= 0 {
-			numCPU = 1
-		}
-		shardBits := 0
-		if numCPU > 1 {
-			shardBits = int(math.Ceil(math.Log2(float64(numCPU))))
 		}
 
 		// Calculate remaining bits for machine ID after accounting for shard bits
 		// Original machineBits was 14 (64 - 41 timestamp - 9 counter)
-		machineBitLen := 64 - config.TimestampBitLen - config.CounterBitLen - shardBits
-		if machineBitLen < 0 {
-			// This should not happen with default values, but guards against extreme custom configs
-			panic("MUID config error: Not enough bits for timestamp, counter, and sharding")
-		}
-		maxMachineID := uint64((1 << machineBitLen) - 1)
+		machineIdMask := uint64((1 << config.MachineIDBitLen) - 1)
 
 		hostname, err := os.Hostname()
 		var machineID uint64
@@ -62,11 +47,11 @@ var (
 			// Fallback: random value masked to machineBitLen
 			var b [8]byte          // Read enough bytes for uint64
 			_, _ = rand.Read(b[:]) // best effort
-			machineID = binary.BigEndian.Uint64(b[:]) & maxMachineID
+			machineID = binary.BigEndian.Uint64(b[:]) & machineIdMask
 		} else {
 			hash := fnv.New64a()
 			hash.Write([]byte(hostname))
-			machineID = hash.Sum64() & maxMachineID
+			machineID = hash.Sum64() & machineIdMask
 		}
 		config.MachineID = machineID
 		return config
@@ -81,22 +66,25 @@ var (
 		shardBits := 0
 		if numCPU > 1 {
 			shardBits = int(math.Ceil(math.Log2(float64(numCPU))))
+			if shardBits > 5 {
+				shardBits = 5
+			}
 		}
 
 		// Get base config potentially containing the calculated MachineID
-		baseCfg := DefaultConfig()
+		defaultConfig := DefaultConfig()
 
 		// Create a config template to pass to each generator constructor
 		// This ensures consistent Epoch, BitLen settings across shards.
 		cfgTemplate := Config{
-			MachineID:       baseCfg.MachineID, // Use the already calculated and masked ID
-			TimestampBitLen: baseCfg.TimestampBitLen,
-			CounterBitLen:   baseCfg.CounterBitLen,
-			Epoch:           baseCfg.Epoch,
+			MachineID:       defaultConfig.MachineID, // Use the already calculated and masked ID
+			TimestampBitLen: defaultConfig.TimestampBitLen,
+			MachineIDBitLen: defaultConfig.MachineIDBitLen,
+			Epoch:           defaultConfig.Epoch,
 		}
 
-		pool := make([]*Generator, numCPU)
-		for i := 0; i < numCPU; i++ {
+		pool := make([]*Generator, 1<<shardBits)
+		for i := 0; i < 1<<shardBits; i++ {
 			// Each generator uses the correct config template, its unique shard index (i),
 			// and the calculated shardBitLen.
 			pool[i] = NewGenerator(cfgTemplate, uint64(i), shardBits)
@@ -114,7 +102,7 @@ var (
 type Config struct {
 	MachineID       uint64
 	TimestampBitLen int
-	CounterBitLen   int
+	MachineIDBitLen int
 	Epoch           int64
 }
 
@@ -133,7 +121,7 @@ type Generator struct {
 	machineID         uint64
 	timestampBitLen   int
 	counterBitLen     int
-	machineBitLen     int
+	machineIdBitLen   int
 	timestampBitShift int
 	counterBitMask    uint64
 	epoch             int64
@@ -155,14 +143,14 @@ func NewGenerator(config Config, shardIndex uint64, shardBitLen int) *Generator 
 	generator := &Generator{
 		machineID:       config.MachineID,
 		timestampBitLen: config.TimestampBitLen,
-		counterBitLen:   config.CounterBitLen,
+		machineIdBitLen: config.MachineIDBitLen,
 		epoch:           config.Epoch,
 		shardIndex:      shardIndex,
 		shardBitLen:     shardBitLen,
 	}
 	// apply defaults if not set
-	if generator.counterBitLen <= 0 {
-		generator.counterBitLen = defaultConfig.CounterBitLen
+	if generator.machineIdBitLen <= 0 {
+		generator.machineIdBitLen = defaultConfig.MachineIDBitLen
 	}
 	if generator.epoch <= 0 {
 		generator.epoch = defaultConfig.Epoch // Use package-level default
@@ -172,12 +160,9 @@ func NewGenerator(config Config, shardIndex uint64, shardBitLen int) *Generator 
 	}
 
 	// Calculate actual machine bit length and shifts considering shard bits
-	generator.machineBitLen = 64 - generator.timestampBitLen - generator.counterBitLen - generator.shardBitLen
-	if generator.machineBitLen < 0 {
-		panic("MUID config error: Not enough bits for timestamp, counter, and sharding in NewGenerator")
-	}
+	generator.counterBitLen = 64 - generator.timestampBitLen - generator.machineIdBitLen - generator.shardBitLen
 
-	generator.timestampBitShift = generator.machineBitLen + generator.shardBitLen + generator.counterBitLen
+	generator.timestampBitShift = generator.machineIdBitLen + generator.shardBitLen + generator.counterBitLen
 	generator.machineIDShift = generator.shardBitLen + generator.counterBitLen
 	generator.shardIndexShift = generator.counterBitLen
 
@@ -187,7 +172,7 @@ func NewGenerator(config Config, shardIndex uint64, shardBitLen int) *Generator 
 		generator.machineID = defaultConfig.MachineID // Use package-level default if not provided
 	}
 	// Mask the machine ID to fit the adjusted machineBitLen
-	generator.machineID = generator.machineID & ((1 << generator.machineBitLen) - 1)
+	generator.machineID = generator.machineID & ((1 << generator.machineIdBitLen) - 1)
 
 	// Mask the shard index to fit the shardBitLen
 	generator.shardIndex = generator.shardIndex & ((1 << generator.shardBitLen) - 1)
