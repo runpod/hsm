@@ -867,6 +867,18 @@ func nonHSMLogic() func(event *hsm.Event) bool {
 	return handleEvent
 }
 
+func TestStop(t *testing.T) {
+	sm := hsm.Start(context.Background(), &THSM{}, &benchModel)
+	<-hsm.Stop(context.Background(), sm)
+	instances, ok := hsm.InstancesFromContext(sm.Context())
+	if !ok {
+		t.Fatalf("expected instances to be non-nil")
+	}
+	if len(instances) != 0 {
+		t.Fatalf("expected instances to be empty")
+	}
+}
+
 func BenchmarkNonHSM(b *testing.B) {
 	handler := nonHSMLogic()
 	b.ResetTimer()

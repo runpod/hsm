@@ -1,5 +1,7 @@
 package elements
 
+import "github.com/runpod/hsm/muid"
+
 type Type interface{}
 
 type Element interface {
@@ -45,10 +47,10 @@ type State interface {
 }
 
 type Event struct {
-	Kind uint64 `json:"kind"`
-	Name string `json:"name"`
-	Id   string `json:"id"`
-	Data any    `json:"data"`
+	Kind uint64    `json:"kind"`
+	Name string    `json:"name"`
+	Id   muid.MUID `json:"id"`
+	Data any       `json:"data"`
 
 	// Deprecated: HSM now waits for all events by default
 	Done chan struct{} `json:"-"`

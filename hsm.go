@@ -1609,8 +1609,20 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 			active.cancel()
 		}
 		clear(sm.active)
-		if all, ok := sm.context.Value(Keys.Instances).(*sync.Map); ok {
-			all.Delete(sm.id)
+		if instancesPointer, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance]); ok {
+			deleteFunc := func(instance Instance) bool {
+				return instance == sm
+			}
+			for {
+				allInstances := instancesPointer.Load()
+				if allInstances == nil {
+					break
+				}
+				instances := slices.DeleteFunc(*allInstances, deleteFunc)
+				if instancesPointer.CompareAndSwap(allInstances, &instances) {
+					break
+				}
+			}
 		}
 		close(done)
 		sm.processing.unlock()
@@ -1902,8 +1914,8 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
-		if event.Id == "" {
-			event.Id = muid.Make().String()
+		if event.Id == 0 {
+			event.Id = muid.Make()
 		}
 		currentState := sm.state.Load().(elements.NamedElement)
 		qualifiedName := currentState.QualifiedName()
@@ -2096,4 +2108,12 @@ func FromContext(ctx context.Context) (Instance, bool) {
 		return hsm, true
 	}
 	return nil, false
+}
+
+func InstancesFromContext(ctx context.Context) ([]Instance, bool) {
+	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
+	if !ok || instancesPointer == nil {
+		return nil, false
+	}
+	return *instancesPointer.Load(), true
 }
