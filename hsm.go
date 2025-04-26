@@ -1106,6 +1106,9 @@ func After[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 				element: element{kind: kind.Concurrent, qualifiedName: path.Join(source.QualifiedName(), "activity", qualifiedName)},
 				operation: func(ctx context.Context, hsm T, _ Event) {
 					duration := expr(ctx, hsm, event)
+					if duration < 0 {
+						return
+					}
 					timer := time.NewTimer(duration)
 					select {
 					case <-timer.C:
@@ -1162,6 +1165,9 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 				element: element{kind: kind.Concurrent, qualifiedName: path.Join(source.QualifiedName(), "activity", qualifiedName)},
 				operation: func(ctx context.Context, hsm T, evt Event) {
 					duration := expr(ctx, hsm, evt)
+					if duration < 0 {
+						return
+					}
 					timer := time.NewTimer(duration)
 					defer timer.Stop()
 					for {
