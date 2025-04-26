@@ -553,6 +553,33 @@ func TestEvery(t *testing.T) {
 		}
 	}
 }
+
+func TestNeverAfter(t *testing.T) {
+	effect := atomic.Bool{}
+	model := hsm.Define(
+		"TestHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo",
+			hsm.Transition(
+				hsm.After(func(ctx context.Context, sm *THSM, event hsm.Event) time.Duration {
+					return time.Second * -1
+				}),
+				hsm.Effect(func(ctx context.Context, sm *THSM, event hsm.Event) {
+					effect.Store(true)
+				}),
+			),
+		),
+	)
+	sm := hsm.Start(context.Background(), &THSM{}, &model)
+	if sm.State() != "/foo" {
+		t.Fatal("state is not correct", "state", sm.State())
+	}
+	time.Sleep(time.Second * 2)
+	if effect.Load() {
+		t.Fatal("effect should not be called")
+	}
+}
+
 func TestDispatchTo(t *testing.T) {
 	model := hsm.Define(
 		"TestHSM",
