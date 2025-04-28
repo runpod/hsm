@@ -2064,7 +2064,7 @@ func Restart(ctx context.Context, hsm Instance, maybeData ...any) <-chan struct{
 	return hsm.restart(ctx, maybeData...)
 }
 
-func Id(hsm Instance) string {
+func ID(hsm Instance) string {
 	return hsm.id()
 }
 
