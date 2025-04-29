@@ -1113,7 +1113,7 @@ func After[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 					select {
 					case <-timer.C:
 						timer.Stop()
-						hsm.Dispatch(ctx, event)
+						hsm.Dispatch(hsm.Context(), event)
 						return
 					case <-ctx.Done():
 						timer.Stop()
@@ -1173,7 +1173,7 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 					for {
 						select {
 						case <-timer.C:
-							<-hsm.Dispatch(ctx, event)
+							<-hsm.Dispatch(hsm.Context(), event)
 							timer.Reset(duration)
 						case <-ctx.Done():
 							return
