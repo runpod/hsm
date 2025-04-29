@@ -222,18 +222,25 @@ type constraint[T Instance] struct {
 // Events can carry data and have completion tracking through the Done channel.
 type Event = elements.Event
 
-var InitialEvent = Event{
-	Name: "hsm_initial",
-}
-var ErrorEvent = Event{
-	Name: "hsm_error",
-	Kind: kind.ErrorEvent,
-}
-
-var AnyEvent = Event{
-	Name: "*",
-	Kind: kind.Event,
-}
+var (
+	InitialEvent = Event{
+		Name: "hsm_initial",
+		Kind: kind.CompletionEvent,
+	}
+	ErrorEvent = Event{
+		Name: "hsm_error",
+		Kind: kind.ErrorEvent,
+	}
+	AnyEvent = Event{
+		Name: "*",
+		Kind: kind.Event,
+	}
+	FinalEvent = Event{
+		Name: "hsm_final",
+		Kind: kind.CompletionEvent,
+	}
+	InfiniteDuration = time.Duration(-1)
+)
 
 type DecodedEvent[T any] struct {
 	Event
@@ -254,10 +261,6 @@ var closedChannel = func() chan struct{} {
 	return done
 }()
 
-var noevent = Event{
-	Done: closedChannel,
-}
-
 type queue struct {
 	mutex  sync.RWMutex
 	events []Event
@@ -273,7 +276,7 @@ func (q *queue) pop() (Event, bool) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 	if len(q.events) == 0 {
-		return noevent, false
+		return Event{}, false
 	}
 	event := q.events[0]
 	q.events = q.events[1:]
@@ -1060,11 +1063,6 @@ func On[T interface{ string | *Event | Event }](events ...T) RedefinableElement 
 	}
 }
 
-// Deprecated: Use On() instead.
-func Trigger[T interface{ string | *Event | Event }](events ...T) RedefinableElement {
-	return On(events...)
-}
-
 // After creates a time-based transition that occurs after a specified duration.
 // The duration can be dynamically computed based on the state machine's context.
 //
@@ -1234,23 +1232,12 @@ func Final(name string) RedefinableElement {
 	}
 }
 
-// func Attribute(name string, maybeDefaultValue ...any) RedefinableElement {
-// 	traceback := traceback()
-// 	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
-// 		ns := find(stack, kind.Namespace)
-// 		if ns == nil {
-// 			traceback(fmt.Errorf("attribute \"%s\" must be called within State() or Define()", name))
-// 		}
-// 		attribute := &attribute{
-// 			element: element{kind: kind.Attribute, qualifiedName: path.Join(ns.QualifiedName(), name)},
-// 		}
-// 		if len(maybeDefaultValue) > 0 {
-// 			attribute.defaultValue = maybeDefaultValue[0]
-// 		}
-// 		model.members[attribute.QualifiedName()] = attribute
-// 		return attribute
-// 	}
-// }
+type Snapshot struct {
+	ID            string
+	QualifiedName string
+	State         string
+	QueueLen      int
+}
 
 // Instance represents an active state machine instance that can process events and track state.
 // It provides methods for event dispatch and state management.
@@ -1265,14 +1252,12 @@ type Instance interface {
 	id() string
 	qualifiedName() string
 	name() string
-	listeners() *listeners
+	channels() *after
+	snapshot() Snapshot
 	start(ctx context.Context, instance Instance, event *Event)
 	stop(ctx context.Context) <-chan struct{}
 	restart(ctx context.Context, maybeData ...any) <-chan struct{}
 }
-
-// Deprecated: Use Instance instead. Context will be removed in a future version.
-type Context = Instance
 
 // HSM is the base type that should be embedded in custom state machine types.
 // It provides the core state machine functionality.
@@ -1339,11 +1324,11 @@ func (mutex *mutex) tryLock() bool {
 	return false
 }
 
-type listeners struct {
-	forEntry     sync.Map
-	forExit      sync.Map
-	forDispatch  sync.Map
-	forProcessed sync.Map
+type after struct {
+	entered    sync.Map
+	exited     sync.Map
+	dispatched sync.Map
+	processed  sync.Map
 }
 
 type hsm[T Instance] struct {
@@ -1356,7 +1341,7 @@ type hsm[T Instance] struct {
 	instance   T
 	timeouts   timeouts
 	processing mutex
-	listening  listeners
+	after      after
 }
 
 // Config provides configuration options for state machine initialization.
@@ -1585,7 +1570,7 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 			case <-ctx.Done():
 				return
 			default:
-				sm.exit(ctx, state, &noevent)
+				sm.exit(ctx, state, &FinalEvent)
 				state, ok = sm.model.members[state.Owner()]
 				if ok {
 					sm.state.Store(state)
@@ -1626,11 +1611,11 @@ func (sm *hsm[T]) Context() context.Context {
 	return sm.context
 }
 
-func (sm *hsm[T]) listeners() *listeners {
+func (sm *hsm[T]) channels() *after {
 	if sm == nil {
 		return nil
 	}
-	return &sm.listening
+	return &sm.after
 }
 
 func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *active {
@@ -1765,7 +1750,7 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 			return nil
 		}
 		sm.exit(ctx, current, event)
-		if ch, ok := sm.listening.forExit.LoadAndDelete(exiting); ok {
+		if ch, ok := sm.after.exited.LoadAndDelete(exiting); ok {
 			close(ch.(chan struct{}))
 		}
 	}
@@ -1784,7 +1769,7 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 		}
 		defaultEntry := entering == transition.target
 		current = sm.enter(ctx, next, event, defaultEntry)
-		if ch, ok := sm.listening.forEntry.LoadAndDelete(entering); ok {
+		if ch, ok := sm.after.entered.LoadAndDelete(entering); ok {
 			close(ch.(chan struct{}))
 		}
 		if defaultEntry {
@@ -1876,7 +1861,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			}
 			qualifiedName = source.Owner()
 		}
-		if ch, ok := sm.listening.forProcessed.LoadAndDelete(event.Name); ok {
+		if ch, ok := sm.after.processed.LoadAndDelete(event.Name); ok {
 			close(ch.(chan struct{}))
 		}
 		event, ok = sm.queue.pop()
@@ -1884,8 +1869,20 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	sm.queue.push(deferred...)
 }
 
-func (sm *hsm[T]) QueueLen() int {
-	return sm.queue.len()
+func (sm *hsm[T]) snapshot() Snapshot {
+	if sm == nil {
+		return Snapshot{}
+	}
+	state, ok := sm.state.Load().(elements.NamedElement)
+	if !ok {
+		state = sm.model
+	}
+	return Snapshot{
+		ID:            sm.behavior.id,
+		QualifiedName: sm.behavior.qualifiedName,
+		State:         state.QualifiedName(),
+		QueueLen:      sm.queue.len(),
+	}
 }
 
 func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
@@ -1903,7 +1900,7 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	if sm.processing.tryLock() {
 		go sm.process(ctx)
 	}
-	if ch, ok := sm.listening.forDispatch.LoadAndDelete(event.Name); ok {
+	if ch, ok := sm.after.dispatched.LoadAndDelete(event.Name); ok {
 		close(ch.(chan struct{}))
 	}
 	return sm.processing.wait()
@@ -2043,35 +2040,23 @@ func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
 	return signal
 }
 
-func ListenForProcessing(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
-	ch, ok := hsm.listeners().forProcessed.LoadOrStore(event.Name, make(chan struct{}))
-	if !ok {
-		return closedChannel
-	}
+func AfterProcessed(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
+	ch, _ := hsm.channels().processed.LoadOrStore(event.Name, make(chan struct{}))
 	return ch.(chan struct{})
 }
 
-func ListenForDispatch(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
-	ch, ok := hsm.listeners().forDispatch.LoadOrStore(event.Name, make(chan struct{}))
-	if !ok {
-		return closedChannel
-	}
+func AfterDispatched(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
+	ch, _ := hsm.channels().dispatched.LoadOrStore(event.Name, make(chan struct{}))
 	return ch.(chan struct{})
 }
 
-func ListenForEntry(ctx context.Context, hsm Instance, state string) <-chan struct{} {
-	ch, ok := hsm.listeners().forEntry.LoadOrStore(state, make(chan struct{}))
-	if !ok {
-		return closedChannel
-	}
+func AfterEntry(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, _ := hsm.channels().entered.LoadOrStore(state, make(chan struct{}))
 	return ch.(chan struct{})
 }
 
-func ListenForExit(ctx context.Context, hsm Instance, state string) <-chan struct{} {
-	ch, ok := hsm.listeners().forExit.LoadOrStore(state, make(chan struct{}))
-	if !ok {
-		return closedChannel
-	}
+func AfterExit(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, _ := hsm.channels().exited.LoadOrStore(state, make(chan struct{}))
 	return ch.(chan struct{})
 }
 
@@ -2125,4 +2110,8 @@ func QualifiedName(hsm Instance) string {
 
 func Name(hsm Instance) string {
 	return hsm.name()
+}
+
+func TakeSnapshot(ctx context.Context, hsm Instance) Snapshot {
+	return hsm.snapshot()
 }

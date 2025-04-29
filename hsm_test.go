@@ -207,7 +207,6 @@ func TestHSM(t *testing.T) {
 			trace.async = append(trace.async, "s11.J.transition.effect")
 			thsm.Dispatch(ctx, hsm.Event{
 				Name: "K",
-				Done: event.Done,
 			})
 		})),
 		hsm.Transition(hsm.On("K"), hsm.Source("/s/s1/s11"), hsm.Target("/s/s3"), hsm.Effect(mockAction("s11.K.transition.effect", false))),
@@ -233,7 +232,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "G",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s1/s11" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -246,7 +244,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "I",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s1/s11" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -259,7 +256,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "A",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s1/s11" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -272,7 +268,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "D",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -285,7 +280,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "D",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s1/s11" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -298,7 +292,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "D",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s1" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -311,7 +304,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "C",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s2/s21/s211" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -324,7 +316,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "E",
-		Done: make(chan struct{}),
 	})
 	if !hsm.Match(sm.State(), "/s/s1/s11") {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -337,7 +328,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "E",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s1/s11" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -350,7 +340,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "G",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s2/s21/s211" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -363,7 +352,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "I",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s2/s21/s211" {
 		t.Fatal("state is not correct", "state", sm.State())
@@ -383,7 +371,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "H",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s2/s21/s211" {
 		t.Fatal("state is not correct after H", "state", sm.State())
@@ -396,7 +383,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "J",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/s/s3" {
 		t.Fatal("state is not correct after J expected /s/s3 got", "state", sm.State())
@@ -409,7 +395,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "K.P.A",
-		Done: make(chan struct{}),
 	})
 	if !trace.contains(Trace{
 		sync: []string{"s11.P.transition.effect"},
@@ -417,7 +402,7 @@ func TestHSM(t *testing.T) {
 		t.Fatal("transition actions are not correct", "trace", trace)
 	}
 	trace.reset()
-	<-sm.Dispatch(ctx, hsm.Event{Name: "Z", Done: make(chan struct{})})
+	<-sm.Dispatch(ctx, hsm.Event{Name: "Z"})
 	if sm.State() != "/s/s3" {
 		t.Fatal("state is not correct after Z", "state", sm.State())
 	}
@@ -431,7 +416,6 @@ func TestHSM(t *testing.T) {
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{
 		Name: "X",
-		Done: make(chan struct{}),
 	})
 	if sm.State() != "/t/u" {
 		t.Fatal("state is not correct after X", "state", sm.State())
@@ -598,7 +582,6 @@ func TestDispatchTo(t *testing.T) {
 	}
 	<-hsm.DispatchTo(sm2.Context(), hsm.Event{
 		Name: "foo",
-		Done: make(chan struct{}),
 	}, "sm*")
 	if sm2.State() != "/bar" {
 		t.Fatal("state is not correct", "state", sm2.State())
@@ -809,7 +792,6 @@ func TestCompletionEventChannelPassing(t *testing.T) {
 	}
 	done := sm.Dispatch(context.Background(), hsm.Event{
 		Name: "b",
-		Done: make(chan struct{}),
 	})
 	<-done
 	if sm.State() != "/d" {
@@ -901,6 +883,23 @@ func TestStop(t *testing.T) {
 	}
 }
 
+func TestSnapshot(t *testing.T) {
+	sm := hsm.Start(context.Background(), &THSM{}, &benchModel)
+	snapshot := hsm.TakeSnapshot(context.Background(), sm)
+	if snapshot.ID == "" {
+		t.Fatalf("expected snapshot to have an ID")
+	}
+	if snapshot.State == "" {
+		t.Fatalf("expected snapshot to have a state")
+	}
+	if snapshot.QueueLen != 0 {
+		t.Fatalf("expected snapshot to have a queue length of 0")
+	}
+	if snapshot.QualifiedName == "" {
+		t.Fatalf("expected snapshot to have a qualified name")
+	}
+}
+
 func BenchmarkNonHSM(b *testing.B) {
 	handler := nonHSMLogic()
 	b.ResetTimer()
@@ -949,7 +948,7 @@ func TestRestart(t *testing.T) {
 	if sm.State() != "/foo" {
 		t.Fatalf("Expected state to be foo, got: %s", sm.State())
 	}
-	<-sm.Dispatch(context.Background(), hsm.Event{Name: "foo", Done: make(chan struct{})})
+	<-sm.Dispatch(context.Background(), hsm.Event{Name: "foo"})
 	if sm.State() != "/bar" {
 		t.Fatalf("Expected state to be bar, got: %s", sm.State())
 	}
@@ -985,31 +984,37 @@ func TestDispatch(t *testing.T) {
 
 }
 
-func TestListen(t *testing.T) {
+func TestAfter(t *testing.T) {
 
 	sm := hsm.Start(context.Background(), &THSM{}, &benchModel)
 	if sm.State() != "/foo" {
 		t.Fatalf("Expected state to be foo, got: %s", sm.State())
 	}
-	entry := hsm.ListenForEntry(sm.Context(), sm, "/bar")
-	exit := hsm.ListenForExit(sm.Context(), sm, "/foo")
-	dispatch := hsm.ListenForDispatch(sm.Context(), sm, hsm.Event{Name: "foo"})
+	entered := hsm.AfterEntry(sm.Context(), sm, "/bar")
+	exited := hsm.AfterExit(sm.Context(), sm, "/foo")
+	dispatched := hsm.AfterDispatched(sm.Context(), sm, hsm.Event{Name: "foo"})
+	processed := hsm.AfterProcessed(sm.Context(), sm, hsm.Event{Name: "foo"})
 
 	<-hsm.Dispatch(sm.Context(), hsm.Event{Name: "foo"})
 	select {
-	case <-dispatch:
+	case <-dispatched:
 	default:
 		t.Fatalf("Expected dispatch to be called")
 	}
 	select {
-	case <-entry:
+	case <-entered:
 	default:
 		t.Fatalf("Expected entry to be called")
 	}
 	select {
-	case <-exit:
+	case <-exited:
 	default:
 		t.Fatalf("Expected exit to be called")
+	}
+	select {
+	case <-processed:
+	default:
+		t.Fatalf("Expected processed to be called")
 	}
 
 }

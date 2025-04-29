@@ -51,22 +51,14 @@ type Event struct {
 	Name string    `json:"name"`
 	Id   muid.MUID `json:"id"`
 	Data any       `json:"data"`
-
-	// Deprecated: HSM now waits for all events by default
-	Done chan struct{} `json:"-"`
 }
 
-func (e Event) WithData(data any, maybeDone ...chan struct{}) Event {
-	var done chan struct{}
-	if len(maybeDone) > 0 {
-		done = maybeDone[0]
-	}
+func (e Event) WithData(data any) Event {
 	return Event{
 		Kind: e.Kind,
 		Name: e.Name,
 		Id:   e.Id,
 		Data: data,
-		Done: done,
 	}
 }
 
@@ -77,7 +69,6 @@ func (e Event) WithDone(done chan struct{}) Event {
 		Name: e.Name,
 		Id:   e.Id,
 		Data: e.Data,
-		Done: done,
 	}
 }
 
