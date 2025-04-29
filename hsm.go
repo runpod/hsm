@@ -1265,7 +1265,7 @@ type Instance interface {
 	id() string
 	qualifiedName() string
 	name() string
-	wait(ctx context.Context) <-chan struct{}
+	listeners() *listeners
 	start(ctx context.Context, instance Instance, event *Event)
 	stop(ctx context.Context) <-chan struct{}
 	restart(ctx context.Context, maybeData ...any) <-chan struct{}
@@ -1339,6 +1339,12 @@ func (mutex *mutex) tryLock() bool {
 	return false
 }
 
+type listeners struct {
+	enter sync.Map
+	exit  sync.Map
+	event sync.Map
+}
+
 type hsm[T Instance] struct {
 	behavior   behavior[T]
 	context    context.Context
@@ -1349,6 +1355,7 @@ type hsm[T Instance] struct {
 	instance   T
 	timeouts   timeouts
 	processing mutex
+	listening  listeners
 }
 
 // Config provides configuration options for state machine initialization.
@@ -1553,7 +1560,7 @@ func (sm *hsm[T]) restart(ctx context.Context, maybeData ...any) <-chan struct{}
 	sm.processing.lock()
 	initialEvent := InitialEvent.WithData(data)
 	(*hsm[T])(sm).start(ctx, sm, &initialEvent)
-	return sm.wait(ctx)
+	return sm.processing.wait()
 }
 
 func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
@@ -1618,11 +1625,11 @@ func (sm *hsm[T]) Context() context.Context {
 	return sm.context
 }
 
-func (sm *hsm[T]) wait(ctx context.Context) <-chan struct{} {
+func (sm *hsm[T]) listeners() *listeners {
 	if sm == nil {
-		return closedChannel
+		return nil
 	}
-	return sm.processing.wait()
+	return &sm.listening
 }
 
 func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *active {
@@ -1757,6 +1764,9 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 			return nil
 		}
 		sm.exit(ctx, current, event)
+		if ch, ok := sm.listening.exit.LoadAndDelete(exiting); ok {
+			close(ch.(chan struct{}))
+		}
 	}
 	for _, effect := range transition.effect {
 		if effect := get[*behavior[T]](sm.model, effect); effect != nil {
@@ -1773,6 +1783,9 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 		}
 		defaultEntry := entering == transition.target
 		current = sm.enter(ctx, next, event, defaultEntry)
+		if ch, ok := sm.listening.enter.LoadAndDelete(entering); ok {
+			close(ch.(chan struct{}))
+		}
 		if defaultEntry {
 			return current
 		}
@@ -1861,6 +1874,9 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				break
 			}
 			qualifiedName = source.Owner()
+		}
+		if ch, ok := sm.listening.event.LoadAndDelete(event.Name); ok {
+			close(ch.(chan struct{}))
 		}
 		event, ok = sm.queue.pop()
 	}
@@ -2022,6 +2038,30 @@ func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
 		}
 	}()
 	return signal
+}
+
+func WaitForDispatch(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
+	ch, ok := hsm.listeners().event.LoadOrStore(event.Name, make(chan struct{}))
+	if !ok {
+		return closedChannel
+	}
+	return ch.(chan struct{})
+}
+
+func WaitForEntry(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, ok := hsm.listeners().enter.LoadOrStore(state, make(chan struct{}))
+	if !ok {
+		return closedChannel
+	}
+	return ch.(chan struct{})
+}
+
+func WaitForExit(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, ok := hsm.listeners().exit.LoadOrStore(state, make(chan struct{}))
+	if !ok {
+		return closedChannel
+	}
+	return ch.(chan struct{})
 }
 
 // FromContext retrieves a state machine instance from a context.
