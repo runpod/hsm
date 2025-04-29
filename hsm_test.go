@@ -17,7 +17,7 @@ import (
 type Trace struct {
 	sync  []string
 	async []string
-	mutex sync.Mutex
+	mutex *sync.Mutex
 }
 
 func (t *Trace) reset() {
@@ -25,10 +25,6 @@ func (t *Trace) reset() {
 	defer t.mutex.Unlock()
 	t.sync = []string{}
 	t.async = []string{}
-}
-
-func tracer(ctx context.Context, sm hsm.Instance, step string, data ...any) (context.Context, func(...any)) {
-	return ctx, func(data ...any) {}
 }
 
 func (t *Trace) matches(expected Trace) bool {
@@ -65,7 +61,9 @@ type THSM struct {
 }
 
 func TestHSM(t *testing.T) {
-	trace := &Trace{}
+	trace := &Trace{
+		mutex: &sync.Mutex{},
+	}
 	// test
 	mockAction := func(name string, async bool) func(ctx context.Context, thsm *THSM, event hsm.Event) {
 		return func(ctx context.Context, thsm *THSM, event hsm.Event) {
@@ -983,6 +981,35 @@ func TestDispatch(t *testing.T) {
 	case <-sm.Context().Done():
 	default:
 		t.Fatalf("Expected state machine to be done")
+	}
+
+}
+
+func TestWait(t *testing.T) {
+
+	sm := hsm.Start(context.Background(), &THSM{}, &benchModel)
+	if sm.State() != "/foo" {
+		t.Fatalf("Expected state to be foo, got: %s", sm.State())
+	}
+	entry := hsm.WaitForEntry(sm.Context(), sm, "/bar")
+	exit := hsm.WaitForExit(sm.Context(), sm, "/foo")
+	dispatch := hsm.WaitForDispatch(sm.Context(), sm, hsm.Event{Name: "foo"})
+
+	<-hsm.Dispatch(sm.Context(), hsm.Event{Name: "foo"})
+	select {
+	case <-dispatch:
+	default:
+		t.Fatalf("Expected dispatch to be called")
+	}
+	select {
+	case <-entry:
+	default:
+		t.Fatalf("Expected entry to be called")
+	}
+	select {
+	case <-exit:
+	default:
+		t.Fatalf("Expected exit to be called")
 	}
 
 }
