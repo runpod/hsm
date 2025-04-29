@@ -9,8 +9,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/runpod/hsm/elements"
-	"github.com/runpod/hsm/kind"
+	"github.com/runpod/hsm/v2/elements"
+	"github.com/runpod/hsm/v2/kind"
 )
 
 func idFromQualifiedName(qualifiedName string) string {

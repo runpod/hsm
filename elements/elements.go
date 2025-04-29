@@ -1,6 +1,6 @@
 package elements
 
-import "github.com/runpod/hsm/muid"
+import "github.com/runpod/hsm/v2/muid"
 
 type Type interface{}
 

@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/runpod/hsm"
-	"github.com/runpod/hsm/pkg/plantuml"
+	"github.com/runpod/hsm/v2"
+	"github.com/runpod/hsm/v2/pkg/plantuml"
 )
 
 type Trace struct {
@@ -985,15 +985,15 @@ func TestDispatch(t *testing.T) {
 
 }
 
-func TestWait(t *testing.T) {
+func TestListen(t *testing.T) {
 
 	sm := hsm.Start(context.Background(), &THSM{}, &benchModel)
 	if sm.State() != "/foo" {
 		t.Fatalf("Expected state to be foo, got: %s", sm.State())
 	}
-	entry := hsm.WaitForEntry(sm.Context(), sm, "/bar")
-	exit := hsm.WaitForExit(sm.Context(), sm, "/foo")
-	dispatch := hsm.WaitForDispatch(sm.Context(), sm, hsm.Event{Name: "foo"})
+	entry := hsm.ListenForEntry(sm.Context(), sm, "/bar")
+	exit := hsm.ListenForExit(sm.Context(), sm, "/foo")
+	dispatch := hsm.ListenForDispatch(sm.Context(), sm, hsm.Event{Name: "foo"})
 
 	<-hsm.Dispatch(sm.Context(), hsm.Event{Name: "foo"})
 	select {

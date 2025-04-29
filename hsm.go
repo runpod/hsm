@@ -16,9 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/runpod/hsm/elements"
-	"github.com/runpod/hsm/kind"
-	"github.com/runpod/hsm/muid"
+	"github.com/runpod/hsm/v2/elements"
+	"github.com/runpod/hsm/v2/kind"
+	"github.com/runpod/hsm/v2/muid"
 )
 
 var (
@@ -1340,9 +1340,10 @@ func (mutex *mutex) tryLock() bool {
 }
 
 type listeners struct {
-	enter sync.Map
-	exit  sync.Map
-	event sync.Map
+	forEntry     sync.Map
+	forExit      sync.Map
+	forDispatch  sync.Map
+	forProcessed sync.Map
 }
 
 type hsm[T Instance] struct {
@@ -1764,7 +1765,7 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 			return nil
 		}
 		sm.exit(ctx, current, event)
-		if ch, ok := sm.listening.exit.LoadAndDelete(exiting); ok {
+		if ch, ok := sm.listening.forExit.LoadAndDelete(exiting); ok {
 			close(ch.(chan struct{}))
 		}
 	}
@@ -1783,7 +1784,7 @@ func (sm *hsm[T]) transition(ctx context.Context, current elements.NamedElement,
 		}
 		defaultEntry := entering == transition.target
 		current = sm.enter(ctx, next, event, defaultEntry)
-		if ch, ok := sm.listening.enter.LoadAndDelete(entering); ok {
+		if ch, ok := sm.listening.forEntry.LoadAndDelete(entering); ok {
 			close(ch.(chan struct{}))
 		}
 		if defaultEntry {
@@ -1875,7 +1876,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			}
 			qualifiedName = source.Owner()
 		}
-		if ch, ok := sm.listening.event.LoadAndDelete(event.Name); ok {
+		if ch, ok := sm.listening.forProcessed.LoadAndDelete(event.Name); ok {
 			close(ch.(chan struct{}))
 		}
 		event, ok = sm.queue.pop()
@@ -1901,7 +1902,9 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	sm.queue.push(event)
 	if sm.processing.tryLock() {
 		go sm.process(ctx)
-		return sm.processing.wait()
+	}
+	if ch, ok := sm.listening.forDispatch.LoadAndDelete(event.Name); ok {
+		close(ch.(chan struct{}))
 	}
 	return sm.processing.wait()
 }
@@ -2040,24 +2043,32 @@ func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
 	return signal
 }
 
-func WaitForDispatch(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
-	ch, ok := hsm.listeners().event.LoadOrStore(event.Name, make(chan struct{}))
+func ListenForProcessing(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
+	ch, ok := hsm.listeners().forProcessed.LoadOrStore(event.Name, make(chan struct{}))
 	if !ok {
 		return closedChannel
 	}
 	return ch.(chan struct{})
 }
 
-func WaitForEntry(ctx context.Context, hsm Instance, state string) <-chan struct{} {
-	ch, ok := hsm.listeners().enter.LoadOrStore(state, make(chan struct{}))
+func ListenForDispatch(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
+	ch, ok := hsm.listeners().forDispatch.LoadOrStore(event.Name, make(chan struct{}))
 	if !ok {
 		return closedChannel
 	}
 	return ch.(chan struct{})
 }
 
-func WaitForExit(ctx context.Context, hsm Instance, state string) <-chan struct{} {
-	ch, ok := hsm.listeners().exit.LoadOrStore(state, make(chan struct{}))
+func ListenForEntry(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, ok := hsm.listeners().forEntry.LoadOrStore(state, make(chan struct{}))
+	if !ok {
+		return closedChannel
+	}
+	return ch.(chan struct{})
+}
+
+func ListenForExit(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, ok := hsm.listeners().forExit.LoadOrStore(state, make(chan struct{}))
 	if !ok {
 		return closedChannel
 	}
