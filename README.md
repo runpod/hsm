@@ -319,9 +319,9 @@ entry := hsm.AfterEntry(sm.Context(), sm, "/active")
 // Listen for exit from the "/idle" state
 exit := hsm.AfterExit(sm.Context(), sm, "/idle")
 // Listen for the dispatch of an event named "myEvent"
-dispatched := hsm.AfterDispatched(sm.Context(), sm, hsm.Event{Name: "myEvent"})
+dispatched := hsm.AfterDispatch(sm.Context(), sm, hsm.Event{Name: "myEvent"})
 // Listen for the completion of processing for an event named "myEvent"
-processed := hsm.AfterProcessed(sm.Context(), sm, hsm.Event{Name: "myEvent"})
+processed := hsm.AfterProcess(sm.Context(), sm, hsm.Event{Name: "myEvent"})
 
 // Example usage: Wait for dispatch
 select {

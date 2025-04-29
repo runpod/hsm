@@ -2040,12 +2040,12 @@ func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
 	return signal
 }
 
-func AfterProcessed(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
+func AfterProcess(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
 	ch, _ := hsm.channels().processed.LoadOrStore(event.Name, make(chan struct{}))
 	return ch.(chan struct{})
 }
 
-func AfterDispatched(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
+func AfterDispatch(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
 	ch, _ := hsm.channels().dispatched.LoadOrStore(event.Name, make(chan struct{}))
 	return ch.(chan struct{})
 }
