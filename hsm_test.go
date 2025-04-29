@@ -992,8 +992,8 @@ func TestAfter(t *testing.T) {
 	}
 	entered := hsm.AfterEntry(sm.Context(), sm, "/bar")
 	exited := hsm.AfterExit(sm.Context(), sm, "/foo")
-	dispatched := hsm.AfterDispatched(sm.Context(), sm, hsm.Event{Name: "foo"})
-	processed := hsm.AfterProcessed(sm.Context(), sm, hsm.Event{Name: "foo"})
+	dispatched := hsm.AfterDispatch(sm.Context(), sm, hsm.Event{Name: "foo"})
+	processed := hsm.AfterProcess(sm.Context(), sm, hsm.Event{Name: "foo"})
 
 	<-hsm.Dispatch(sm.Context(), hsm.Event{Name: "foo"})
 	select {
