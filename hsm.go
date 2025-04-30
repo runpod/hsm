@@ -262,36 +262,44 @@ var closedChannel = func() chan struct{} {
 }()
 
 type queue struct {
-	mutex  sync.RWMutex
-	events []Event
+	mutex sync.RWMutex
+	front []Event
+	back  []Event
 }
 
 func (q *queue) len() int {
 	q.mutex.RLock()
 	defer q.mutex.RUnlock()
-	return len(q.events)
+	return len(q.back)
 }
 
 func (q *queue) pop() (Event, bool) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
-	if len(q.events) == 0 {
-		return Event{}, false
+	var event Event
+	if len(q.back) == 0 && len(q.front) == 0 {
+		return event, false
 	}
-	event := q.events[0]
-	q.events = q.events[1:]
-	return event, true
+	if len(q.front) > 0 {
+		event = q.front[0]
+		q.front = q.front[:len(q.front)-1]
+		return event, true
+	} else {
+		event = q.back[0]
+		q.back = q.back[:len(q.back)-1]
+		return event, true
+	}
 }
 
 func (q *queue) push(events ...Event) {
 	for _, event := range events {
 		if kind.IsKind(event.Kind, kind.CompletionEvent) {
 			q.mutex.Lock()
-			q.events = append([]Event{event}, q.events...)
+			q.front = append(q.front, event)
 			q.mutex.Unlock()
 		} else {
 			q.mutex.Lock()
-			q.events = append(q.events, event)
+			q.back = append(q.back, event)
 			q.mutex.Unlock()
 		}
 	}
@@ -1229,6 +1237,86 @@ func Final(name string) RedefinableElement {
 	}
 }
 
+// Match provides a simple interface, handling basic cases directly
+// and delegating complex matching to the match function.
+func Match(value string, patterns ...string) bool {
+	for _, pattern := range patterns {
+		// Handle simple cases for performance or clarity
+		if pattern == "*" {
+			return true // '*' matches anything, including empty string
+		}
+		if pattern == "" {
+			return value == "" // Empty pattern only matches empty value
+		}
+		// Delegate to the main matching logic
+		if match(value, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// match implements wildcard matching using a goto-based iterative approach.
+// It supports the '*' wildcard, which matches zero or more characters.
+func match(value, pattern string) bool {
+	valueIndex, patternIndex := 0, 0
+	valueLen, patternLen := len(value), len(pattern)
+	// patternStarIndex: index of the last '*' encountered in the pattern p.
+	// valueStarIndex: index in the value string v corresponding to the position *after* the characters matched by the last '*'.
+	patternStarIndex, valueStarIndex := -1, -1
+
+LOOP_START:
+	// Check if the current pattern character is '*'
+	if patternIndex < patternLen && pattern[patternIndex] == '*' {
+		patternStarIndex = patternIndex // Remember the position of this '*'
+		patternIndex++                  // Advance the pattern index past the '*'
+		valueStarIndex = valueIndex     // Remember the value index where '*' matching might backtrack to
+		// If '*' is the last character in the pattern, it matches the rest of the value
+		if patternIndex == patternLen {
+			return true
+		}
+		// Continue processing, effectively trying to match zero characters with '*' first
+		goto LOOP_START
+	}
+
+	// Check if current characters match
+	if valueIndex < valueLen && patternIndex < patternLen && pattern[patternIndex] == value[valueIndex] {
+		valueIndex++    // Advance value index
+		patternIndex++  // Advance pattern index
+		goto LOOP_START // Continue matching the next characters
+	}
+
+	// Check if we have reached the end of both strings
+	if valueIndex == valueLen && patternIndex == patternLen {
+		return true // Both strings are exhausted, successful match
+	}
+
+	// Check if we reached the end of the value string, but the pattern string remains
+	if valueIndex == valueLen && patternIndex < patternLen {
+		// Consume any trailing '*' characters in the pattern
+		for patternIndex < patternLen && pattern[patternIndex] == '*' {
+			patternIndex++
+		}
+		// If the pattern is now exhausted, it's a match
+		return patternIndex == patternLen
+	}
+
+	// Mismatch occurred, or end of pattern reached while value string still has characters.
+	// Try backtracking if a '*' was previously encountered.
+	if patternStarIndex != -1 {
+		// Backtrack: Advance the value index associated with the last '*'
+		valueStarIndex++
+		// If the backtracking value index goes beyond the value string length, matching failed
+		if valueStarIndex > valueLen {
+			return false
+		}
+		valueIndex = valueStarIndex         // Reset the current value index to the new backtrack position
+		patternIndex = patternStarIndex + 1 // Reset the pattern index to the character immediately after the last '*'
+		goto LOOP_START                     // Retry matching from the new state
+	}
+	return false
+}
+
 type Snapshot struct {
 	ID            string
 	QualifiedName string
@@ -1361,102 +1449,6 @@ var Keys = struct {
 }{
 	Instances: key[*atomic.Pointer[[]Instance]]{},
 	HSM:       key[HSM]{},
-}
-
-func Match(state string, patterns ...string) bool {
-	for _, pattern := range patterns {
-		if pattern == "" {
-			return state == pattern
-		}
-		if pattern == "*" || state == pattern {
-			return true
-		}
-		var lastErotemeCluster byte
-		var patternIndex, sIndex, lastStar, lastEroteme int
-		patternLen := len(pattern)
-		sLen := len(state)
-		star := -1
-		eroteme := -1
-
-	Loop:
-		if sIndex >= sLen {
-			goto checkPattern
-		}
-
-		if patternIndex >= patternLen {
-			if star != -1 {
-				patternIndex = star + 1
-				lastStar++
-				sIndex = lastStar
-				goto Loop
-			}
-			continue
-		}
-		switch pattern[patternIndex] {
-		case '.':
-			// It matches any single character. So, we don't need to check anything.
-		case '?':
-			// '?' matches one character. Store its position and match exactly one character in the string.
-			eroteme = patternIndex
-			lastEroteme = sIndex
-			lastErotemeCluster = byte(state[sIndex])
-		case '*':
-			// '*' matches zero or more characters. Store its position and increment the pattern index.
-			star = patternIndex
-			lastStar = sIndex
-			patternIndex++
-			goto Loop
-		default:
-			// If the characters don't match, check if there was a previous '?' or '*' to backtrack.
-			if pattern[patternIndex] != state[sIndex] {
-				if eroteme != -1 {
-					patternIndex = eroteme + 1
-					sIndex = lastEroteme
-					eroteme = -1
-					goto Loop
-				}
-
-				if star != -1 {
-					patternIndex = star + 1
-					lastStar++
-					sIndex = lastStar
-					goto Loop
-				}
-
-				continue
-			}
-
-			// If the characters match, check if it was not the same to validate the eroteme.
-			if eroteme != -1 && lastErotemeCluster != byte(state[sIndex]) {
-				eroteme = -1
-			}
-		}
-
-		patternIndex++
-		sIndex++
-		goto Loop
-
-		// Check if the remaining pattern characters are '*' or '?', which can match the end of the string.
-	checkPattern:
-		if patternIndex < patternLen {
-			if pattern[patternIndex] == '*' {
-				patternIndex++
-				goto checkPattern
-			} else if pattern[patternIndex] == '?' {
-				if sIndex >= sLen {
-					sIndex--
-				}
-				patternIndex++
-				goto checkPattern
-			}
-		}
-
-		if patternIndex == patternLen {
-			return true
-		}
-	}
-	return false
-
 }
 
 // Start creates and starts a new state machine instance with the given model and configuration.
@@ -1813,7 +1805,7 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 			continue
 		}
 		for _, evt := range transition.Events() {
-			if !Match(event.Name, evt) {
+			if !match(event.Name, evt) {
 				continue
 			}
 			if guard := get[*constraint[T]](sm.model, transition.Guard()); guard != nil {
@@ -1858,9 +1850,11 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				sm.state.Store(state)
 				break
 			}
-			if matches := Match(event.Name, source.deferred...); matches {
-				deferred = append(deferred, event)
-				break
+			for _, deferredEvent := range source.deferred {
+				if Match(event.Name, deferredEvent) {
+					deferred = append(deferred, event)
+					break
+				}
 			}
 			qualifiedName = source.Owner()
 		}

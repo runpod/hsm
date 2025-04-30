@@ -462,16 +462,6 @@ func TestHSM(t *testing.T) {
 
 }
 
-func TestMatch(t *testing.T) {
-	if !hsm.Match("/synced/exited", "/synced/*") {
-		t.Fatal("Match is not correct /foo/bar is a match for /foo/bar/baz")
-	}
-	if hsm.Match("/foo/bar/baz", "/foo/bar") {
-		t.Fatal("Match is not correct /foo/bar is not a match for /foo/bar/baz")
-	}
-
-}
-
 func TestHSMDispatchAll(t *testing.T) {
 	model := hsm.Define(
 		"TestHSM",
@@ -734,7 +724,7 @@ var benchModel = hsm.Define(
 	// hsm.Telemetry(provider.Tracer("github.com/stateforward/go-hsm")),
 )
 
-func TestCompletionEventChannelPassing(t *testing.T) {
+func TestCompletionEvent(t *testing.T) {
 	model := hsm.Define(
 		"T",
 		hsm.Initial(hsm.Target("a")),
@@ -800,17 +790,95 @@ func TestCompletionEventChannelPassing(t *testing.T) {
 
 }
 
-// var benchSM = hsm.Start(context.Background(), &THSM{}, &benchModel)
+func TestMatch(t *testing.T) {
+	const sample = "a/ab/abc/abcd/abcde/abcdef/abcdefg/abcdefgh/abcdefghi/abcdefghij/abcdefghijk/abcdefghijkl/abcdefghijklm/abcdefghijklmn/abcdefghijklmno/abcdefghijklmnop/abcdefghijklmnopq/abcdefghijklmnopqr/abcdefghijklmnopqrs/abcdefghijklmnopqrst/abcdefghijklmnopqrstu/abcdefghijklmnopqrstuv/abcdefghijklmnopqrstuvw/abcdefghijklmnopqrstuvwx/abcdefghijklmnopqrstuvwxy/abcdefghijklmnopqrstuvwxyz"
+	if !hsm.Match(sample, "a/*/a*/abcde/*") {
+		t.Fatal("expected match for a/*/a*/abcde/*")
+	}
+	if hsm.Match(sample, "a/*/a*/abcde/") {
+		t.Fatal("expected no match for a/*/a*/abcde/")
+	}
+	if hsm.Match(sample, "a/*/a*/abcde/") {
+		t.Fatal("expected no match for a/*/a*/abcde/")
+	}
+	if !hsm.Match("abc", "a*c") {
+		t.Fatal("expected match for abc, a*c")
+	}
+	if !hsm.Match("abc", "*b*") {
+		t.Fatal("expected match for abc, *b*")
+	}
+	if !hsm.Match("abc", "*c") {
+		t.Fatal("expected match for abc, *c")
+	}
+	if !hsm.Match("abc", "a*") {
+		t.Fatal("expected match for abc, a*")
+	}
+	if !hsm.Match("abc", "*") {
+		t.Fatal("expected match for abc, *")
+	}
+	if !hsm.Match("", "*") {
+		t.Fatal("expected match for '', *")
+	}
+	if !hsm.Match("a", "a") {
+		t.Fatal("expected match for a, a")
+	}
+	if hsm.Match("a", "b") {
+		t.Fatal("expected no match for a, b")
+	}
+	if hsm.Match("a", "") {
+		t.Fatal("expected no match for a, ''")
+	}
+	if hsm.Match("", "a") {
+		t.Fatal("expected no match for '', a")
+	}
+	if !hsm.Match("", "") {
+		t.Fatal("expected match for '', ''")
+	}
+	if hsm.Match("abc", "a*d") {
+		t.Fatal("expected no match for abc, a*d")
+	}
+	if !hsm.Match("abcdef", "ab*ef") {
+		t.Fatal("expected match for abcdef, ab*ef")
+	}
+	if !hsm.Match("abcdef", "a*f") {
+		t.Fatal("expected match for abcdef, a*f")
+	}
+	if !hsm.Match("abcdef", "*f") {
+		t.Fatal("expected match for abcdef, *f")
+	}
+	if !hsm.Match("abcdef", "a*") {
+		t.Fatal("expected match for abcdef, a*")
+	}
+	if hsm.Match("abcdef", "a*g") {
+		t.Fatal("expected no match for abcdef, a*g")
+	}
+	if !hsm.Match("zzabcdef", "*f") {
+		t.Fatal("expected match for zzabcdef, *f")
+	}
+	if hsm.Match("zzabcdef", "b*") {
+		t.Fatal("expected no match for zzabcdef, b*")
+	}
+	if !hsm.Match(sample, "*xyz") {
+		t.Fatal("expected match for sample, *xyz")
+	}
+	if !hsm.Match(sample, "a*z") {
+		t.Fatal("expected match for sample, a*z")
+	}
+	if !hsm.Match(sample, "a*x*z") {
+		t.Fatal("expected match for sample, a*x*z")
+	}
+	if !hsm.Match(sample, "a*x*y*z") {
+		t.Fatal("expected match for sample, a*x*y*z")
+	}
 
+}
 func BenchmarkHSM(b *testing.B) {
 	ctx := context.Background()
 	fooEvent := hsm.Event{
 		Name: "foo",
-		// Done: make(chan struct{}),
 	}
 	barEvent := hsm.Event{
 		Name: "bar",
-		// Done: make(chan struct{}),
 	}
 	benchSM := hsm.Start(ctx, &THSM{}, &benchModel)
 	b.ReportAllocs()
