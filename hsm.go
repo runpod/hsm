@@ -1241,29 +1241,34 @@ func Final(name string) RedefinableElement {
 // and delegating complex matching to the match function.
 func Match(value string, patterns ...string) bool {
 	for _, pattern := range patterns {
-		// Handle simple cases for performance or clarity
+		// fast path for exact match
+		if pattern == value {
+			return true
+		}
+		// fast path for pure wildcard match
 		if pattern == "*" {
-			return true // '*' matches anything, including empty string
+			return true
 		}
 		patternLen := len(pattern)
+		// fast path for empty pattern
 		if patternLen == 0 {
-			return value == "" // Empty pattern only matches empty value
+			return value == ""
 		}
 		// fast path for long strings with a pattern that ends with "*
 		if pattern[patternLen-1] == '*' && strings.HasSuffix(value, pattern[:patternLen-1]) {
 			return true
 		}
-		// Delegate to the main matching logic
-		if match(value, pattern) {
+		// parse the value and pattern to check for a match
+		if parse(value, pattern) {
 			return true
 		}
 	}
 	return false
 }
 
-// match implements wildcard matching using a goto-based iterative approach.
+// parse implements wildcard matching using a goto-based iterative approach.
 // It supports the '*' wildcard, which matches zero or more characters.
-func match(value, pattern string) bool {
+func parse(value, pattern string) bool {
 	valueIndex, patternIndex := 0, 0
 	valueLen, patternLen := len(value), len(pattern)
 	// patternStarIndex: index of the last '*' encountered in the pattern p.
