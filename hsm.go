@@ -1255,7 +1255,7 @@ func Match(value string, patterns ...string) bool {
 			return value == ""
 		}
 		// fast path for long strings with a pattern that ends with "*
-		if pattern[patternLen-1] == '*' && strings.HasSuffix(value, pattern[:patternLen-1]) {
+		if pattern[patternLen-1] == '*' && strings.HasPrefix(value, pattern[:patternLen-1]) {
 			return true
 		}
 		// parse the value and pattern to check for a match
