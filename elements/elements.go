@@ -31,7 +31,7 @@ type Transition interface {
 	Target() string
 	Guard() string
 	Effect() []string
-	Events() []Event
+	Events() []string
 }
 
 type Vertex interface {

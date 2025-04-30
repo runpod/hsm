@@ -175,7 +175,7 @@ type transition struct {
 	target string
 	guard  string
 	effect []string
-	events []Event
+	events []string
 	paths  map[string]paths
 }
 
@@ -187,7 +187,7 @@ func (transition *transition) Effect() []string {
 	return transition.effect
 }
 
-func (transition *transition) Events() []Event {
+func (transition *transition) Events() []string {
 	return transition.events
 }
 
@@ -395,9 +395,9 @@ func getFunctionName(fn any) string {
 	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 }
 
-func hasWildcard(events ...Event) bool {
+func hasWildcard(events ...string) bool {
 	for _, event := range events {
-		if strings.Contains(event.Name, "*") {
+		if strings.Contains(event, "*") {
 			return true
 		}
 	}
@@ -545,7 +545,7 @@ func Transition[T interface{ RedefinableElement | string }](nameOrPartialElement
 			traceback(fmt.Errorf("transition \"%s\" must be called within a State() or Define()", name))
 		}
 		transition := &transition{
-			events: []Event{},
+			events: []string{},
 			element: element{
 				kind:          kind.Transition,
 				qualifiedName: path.Join(owner.QualifiedName(), name),
@@ -857,7 +857,7 @@ func Initial[T interface{ string | RedefinableElement }](elementOrName T, partia
 		if transition.guard != "" {
 			traceback(fmt.Errorf("initial \"%s\" cannot have a guard", initial.QualifiedName()))
 		}
-		if transition.events[0].Name != InitialEvent.Name {
+		if transition.events[0] != InitialEvent.Name {
 			traceback(fmt.Errorf("initial \"%s\" must not have a trigger \"%s\"", initial.QualifiedName(), InitialEvent.Name))
 		}
 		if !strings.HasPrefix(transition.target, owner.QualifiedName()) {
@@ -1045,19 +1045,16 @@ func On[T interface{ string | *Event | Event }](events ...T) RedefinableElement 
 		}
 		transition := owner.(*transition)
 		for _, eventOrName := range events {
-			switch any(eventOrName).(type) {
+			var name string
+			switch e := any(eventOrName).(type) {
 			case string:
-				name := any(eventOrName).(string)
-				transition.events = append(transition.events, Event{
-					Kind: kind.Event,
-					Name: name,
-				})
+				name = e
 			case Event:
-				transition.events = append(transition.events, any(eventOrName).(Event))
+				name = e.Name
 			case *Event:
-				event := any(eventOrName).(*Event)
-				transition.events = append(transition.events, *event)
+				name = e.Name
 			}
+			transition.events = append(transition.events, name)
 		}
 		return owner
 	}
@@ -1090,7 +1087,7 @@ func After[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 			// Id:   strconv.FormatUint(uint64(hash), 32),
 			Name: qualifiedName,
 		}
-		owner.events = append(owner.events, event)
+		owner.events = append(owner.events, qualifiedName)
 		model.push(func(model *Model, stack []elements.NamedElement) elements.NamedElement {
 			maybeSource, ok := model.members[owner.source]
 			if !ok {
@@ -1149,7 +1146,7 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 			// Id:   strconv.FormatUint(uint64(hash), 32),
 			Name: qualifiedName,
 		}
-		owner.events = append(owner.events, event)
+		owner.events = append(owner.events, qualifiedName)
 		model.push(func(model *Model, stack []elements.NamedElement) elements.NamedElement {
 			maybeSource, ok := model.members[owner.source]
 			if !ok {
@@ -1368,6 +1365,12 @@ var Keys = struct {
 
 func Match(state string, patterns ...string) bool {
 	for _, pattern := range patterns {
+		if pattern == "" {
+			return state == pattern
+		}
+		if pattern == "*" || state == pattern {
+			return true
+		}
 		var lastErotemeCluster byte
 		var patternIndex, sIndex, lastStar, lastEroteme int
 		patternLen := len(pattern)
@@ -1810,7 +1813,7 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 			continue
 		}
 		for _, evt := range transition.Events() {
-			if matched, err := path.Match(evt.Name, event.Name); err != nil || !matched {
+			if !Match(event.Name, evt) {
 				continue
 			}
 			if guard := get[*constraint[T]](sm.model, transition.Guard()); guard != nil {
