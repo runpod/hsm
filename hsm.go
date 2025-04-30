@@ -1245,8 +1245,13 @@ func Match(value string, patterns ...string) bool {
 		if pattern == "*" {
 			return true // '*' matches anything, including empty string
 		}
-		if pattern == "" {
+		patternLen := len(pattern)
+		if patternLen == 0 {
 			return value == "" // Empty pattern only matches empty value
+		}
+		// fast path for long strings with a pattern that ends with "*
+		if pattern[patternLen-1] == '*' && strings.HasSuffix(value, pattern[:patternLen-1]) {
+			return true
 		}
 		// Delegate to the main matching logic
 		if match(value, pattern) {
@@ -1805,7 +1810,7 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 			continue
 		}
 		for _, evt := range transition.Events() {
-			if !match(event.Name, evt) {
+			if !Match(event.Name, evt) {
 				continue
 			}
 			if guard := get[*constraint[T]](sm.model, transition.Guard()); guard != nil {
