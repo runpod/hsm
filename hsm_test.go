@@ -60,7 +60,7 @@ type THSM struct {
 	foo int
 }
 
-func TestHSM(t *testing.T) {
+func TestComplex(t *testing.T) {
 	trace := &Trace{
 		mutex: &sync.Mutex{},
 	}
@@ -581,12 +581,8 @@ func TestDispatchTo(t *testing.T) {
 	}
 }
 
-var bytes []byte
-
 func noBehavior(ctx context.Context, hsm *THSM, event hsm.Event) {
-	if event.Data != nil {
-		copy(bytes, event.Data.([]byte))
-	}
+	// slog.Info("noBehavior", "event", event.Name)
 }
 
 func TestChoiceBackToSource(t *testing.T) {
@@ -705,26 +701,26 @@ func TestLCA(t *testing.T) {
 var benchModel = hsm.Define(
 	"TestHSM",
 	hsm.State("foo",
-		hsm.Entry(noBehavior),
-		hsm.Exit(noBehavior),
-		hsm.Activity(noBehavior),
+		hsm.Entry(noBehavior, noBehavior, noBehavior),
+		hsm.Exit(noBehavior, noBehavior, noBehavior),
+		hsm.Activity(noBehavior, noBehavior, noBehavior),
 	),
 	hsm.State("bar",
 		hsm.Entry(noBehavior),
 		hsm.Exit(noBehavior),
-		hsm.Activity(noBehavior),
+		hsm.Activity(noBehavior, noBehavior, noBehavior),
 	),
 	hsm.Transition(
 		hsm.On("foo"),
 		hsm.Source("foo"),
 		hsm.Target("bar"),
-		hsm.Effect(noBehavior),
+		hsm.Effect(noBehavior, noBehavior, noBehavior),
 	),
 	hsm.Transition(
 		hsm.On("bar"),
 		hsm.Source("bar"),
 		hsm.Target("foo"),
-		hsm.Effect(noBehavior),
+		hsm.Effect(noBehavior, noBehavior, noBehavior),
 	),
 	hsm.Initial(hsm.Target("foo"), hsm.Effect(noBehavior)),
 )
@@ -877,24 +873,58 @@ func TestMatch(t *testing.T) {
 	}
 
 }
-func BenchmarkHSM(b *testing.B) {
+
+func BenchmarkTransition(b *testing.B) {
 	ctx := context.Background()
+	var counter atomic.Int64
+	behavior := func(ctx context.Context, hsm *THSM, event hsm.Event) {
+		counter.Add(1)
+	}
+	var benchModel = hsm.Define(
+		"BenchmarkExecutionHSM",
+		hsm.State("foo",
+			hsm.Entry(behavior),
+			hsm.Exit(behavior),
+			hsm.Activity(behavior),
+		),
+		hsm.State("bar",
+			hsm.Entry(behavior),
+			hsm.Exit(behavior),
+			hsm.Activity(behavior),
+		),
+		hsm.Transition(
+			hsm.On("foo"),
+			hsm.Source("foo"),
+			hsm.Target("bar"),
+			hsm.Effect(behavior),
+		),
+		hsm.Transition(
+			hsm.On("bar"),
+			hsm.Source("bar"),
+			hsm.Target("foo"),
+			hsm.Effect(behavior),
+		),
+		hsm.Initial(hsm.Target("foo")),
+	)
 	fooEvent := hsm.Event{
 		Name: "foo",
 	}
 	barEvent := hsm.Event{
 		Name: "bar",
 	}
-	benchSM := hsm.Start(ctx, &THSM{}, &benchModel)
+	benchSM := hsm.Start(ctx, &THSM{}, &benchModel, hsm.Config{
+		ActivityTimeout: 1 * time.Second,
+	})
 	b.ReportAllocs()
-
 	b.ResetTimer()
+	counter.Store(0)
 	for i := 0; i < b.N; i++ {
 		benchSM.Dispatch(ctx, fooEvent)
 		benchSM.Dispatch(ctx, barEvent)
 	}
+	// slog.Info("stopping", "snapshot", hsm.TakeSnapshot(ctx, benchSM), "counter", counter.Load())
 	<-hsm.Stop(ctx, benchSM)
-
+	slog.Info("stopped", "snapshot", hsm.TakeSnapshot(ctx, benchSM), "counter", counter.Load(), "count", b.N*2*4)
 }
 
 func nonHSMLogic() func(event *hsm.Event) bool {
@@ -1118,6 +1148,10 @@ func TestAfter(t *testing.T) {
 
 }
 
+func noGuard(ctx context.Context, hsm *THSM, event hsm.Event) bool {
+	return true
+}
+
 func TestPropagate(t *testing.T) {
 	model := hsm.Define(
 		"TestPropagateHSM",
@@ -1157,5 +1191,119 @@ func TestPropagateAll(t *testing.T) {
 		if instances[i].State() != "/bar" {
 			t.Fatalf("Expected instance %d state to be bar, got: %s", i, instances[i].State())
 		}
+	}
+}
+
+func BenchmarkModel(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		_ = hsm.Define(
+			"TestHSM",
+			hsm.State("s",
+				hsm.Entry(noBehavior),
+				hsm.Activity(noBehavior),
+				hsm.Exit(noBehavior),
+				hsm.State("s1",
+					hsm.State("s11",
+						hsm.Entry(noBehavior),
+						hsm.Activity(noBehavior),
+						hsm.Exit(noBehavior),
+					),
+					hsm.Initial(hsm.Target("s11"), hsm.Effect(noBehavior)),
+					hsm.Exit(noBehavior),
+					hsm.Entry(noBehavior),
+					hsm.Activity(noBehavior),
+					hsm.Transition(hsm.On("I"), hsm.Effect(noBehavior)),
+					hsm.Transition(hsm.On("A"), hsm.Target("/s/s1"), hsm.Effect(noBehavior)),
+				),
+				hsm.Transition(hsm.On("D"), hsm.Source("/s/s1/s11"), hsm.Target("/s/s1"), hsm.Effect(noBehavior), hsm.Guard(
+					noGuard,
+				)),
+				hsm.Initial(hsm.Target("s1/s11"), hsm.Effect(noBehavior)),
+				hsm.State("s2",
+					hsm.Entry(noBehavior),
+					hsm.Activity(noBehavior),
+					hsm.Exit(noBehavior),
+					hsm.State("s21",
+						hsm.State("s211",
+							hsm.Entry(noBehavior),
+							hsm.Activity(noBehavior),
+							hsm.Exit(noBehavior),
+							hsm.Transition(hsm.On("G"), hsm.Target("/s/s1/s11"), hsm.Effect(noBehavior)),
+						),
+						hsm.Initial(hsm.Target("s211"), hsm.Effect(noBehavior)),
+						hsm.Entry(noBehavior),
+						hsm.Activity(noBehavior),
+						hsm.Exit(noBehavior),
+						hsm.Transition(hsm.On("A"), hsm.Target("/s/s2/s21")), // self transition
+					),
+					hsm.Initial(hsm.Target("s21/s211"), hsm.Effect(noBehavior)),
+					hsm.Transition(hsm.On("C"), hsm.Target("/s/s1"), hsm.Effect(noBehavior)),
+				),
+				hsm.State("s3",
+					hsm.Entry(noBehavior),
+					hsm.Activity(noBehavior),
+					hsm.Exit(noBehavior),
+				),
+				hsm.Transition(hsm.On(`*.P.*`), hsm.Effect(noBehavior)),
+			),
+			hsm.State("t",
+				hsm.Entry(noBehavior),
+				hsm.Activity(noBehavior),
+				hsm.Exit(noBehavior),
+				hsm.State(
+					"u",
+					hsm.Entry(noBehavior),
+					hsm.Activity(noBehavior),
+					hsm.Exit(noBehavior),
+					hsm.Transition(
+						hsm.On("u.t"),
+						hsm.Target("/t"),
+						hsm.Effect(noBehavior),
+					),
+				),
+				hsm.Transition(
+					hsm.On("X"),
+					hsm.Target("/exit"),
+					hsm.Effect(noBehavior),
+				),
+			),
+
+			hsm.Final("exit"),
+			hsm.Initial(
+				hsm.Target(hsm.Choice(
+					"initial_choice",
+					hsm.Transition(hsm.Target("/s/s2")),
+				)), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("D"), hsm.Source("/s/s1"), hsm.Target("/s"), hsm.Effect(noBehavior), hsm.Guard(
+				noGuard,
+			)),
+			hsm.Transition("wildcard", hsm.On("abcd*"), hsm.Source("/s"), hsm.Target("/s")),
+			hsm.Transition(hsm.On("D"), hsm.Source("/s"), hsm.Target("/s"), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("C"), hsm.Source("/s/s1"), hsm.Target("/s/s2"), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("E"), hsm.Source("/s"), hsm.Target("/s/s1/s11"), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("G"), hsm.Source("/s/s1/s11"), hsm.Target("/s/s2/s21/s211"), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("I"), hsm.Source("/s"), hsm.Effect(noBehavior), hsm.Guard(
+				noGuard,
+			)),
+			hsm.Transition(hsm.After(
+				func(ctx context.Context, hsm *THSM, event hsm.Event) time.Duration {
+					return time.Second * 2
+				},
+			), hsm.Source("/s/s2/s21/s211"), hsm.Target("/s/s1/s11"), hsm.Effect(noBehavior), hsm.Guard(
+				noGuard,
+			)),
+			hsm.Transition(hsm.On("H"), hsm.Source("/s/s1/s11"), hsm.Target(
+				hsm.Choice(
+					hsm.Transition(hsm.Target("/s/s1"), hsm.Guard(
+						noGuard,
+					)),
+					hsm.Transition(hsm.Target("/s/s2"), hsm.Effect(noBehavior)),
+				),
+			), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("J"), hsm.Source("/s/s2/s21/s211"), hsm.Target("/s/s1/s11"), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("K"), hsm.Source("/s/s1/s11"), hsm.Target("/s/s3"), hsm.Effect(noBehavior)),
+			hsm.Transition(hsm.On("Z"), hsm.Effect(noBehavior), hsm.Source("/s/s3"), hsm.Target("/t/u")),
+			hsm.Transition(hsm.On("X"), hsm.Effect(noBehavior), hsm.Source("/s/s3"), hsm.Target("/t/u")),
+		)
 	}
 }

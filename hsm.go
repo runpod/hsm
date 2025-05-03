@@ -262,45 +262,44 @@ var closedChannel = func() chan struct{} {
 }()
 
 type queue struct {
-	mutex sync.RWMutex
-	front []Event
-	back  []Event
+	mutex            sync.RWMutex
+	completionEvents []Event // lifo
+	events           []Event // fifo
 }
+
+var empty = Event{}
 
 func (q *queue) len() int {
 	q.mutex.RLock()
 	defer q.mutex.RUnlock()
-	return len(q.back)
+	return len(q.events) + len(q.completionEvents)
 }
 
 func (q *queue) pop() (Event, bool) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
-	var event Event
-	if len(q.back) == 0 && len(q.front) == 0 {
-		return event, false
-	}
-	if len(q.front) > 0 {
-		event = q.front[0]
-		q.front = q.front[:len(q.front)-1]
+	switch {
+	case len(q.completionEvents) > 0:
+		event := q.completionEvents[len(q.completionEvents)-1]
+		q.completionEvents = q.completionEvents[:len(q.completionEvents)-1]
 		return event, true
-	} else {
-		event = q.back[0]
-		q.back = q.back[:len(q.back)-1]
+	case len(q.events) > 0:
+		event := q.events[0]
+		q.events = q.events[1:]
 		return event, true
+	default:
+		return empty, false
 	}
 }
 
 func (q *queue) push(events ...Event) {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
 	for _, event := range events {
 		if kind.IsKind(event.Kind, kind.CompletionEvent) {
-			q.mutex.Lock()
-			q.front = append(q.front, event)
-			q.mutex.Unlock()
+			q.completionEvents = append(q.completionEvents, event)
 		} else {
-			q.mutex.Lock()
-			q.back = append(q.back, event)
-			q.mutex.Unlock()
+			q.events = append(q.events, event)
 		}
 	}
 }
@@ -1433,7 +1432,7 @@ type active struct {
 }
 
 type timeouts struct {
-	terminate time.Duration
+	activity time.Duration
 }
 
 type mutex struct {
@@ -1474,11 +1473,12 @@ type after struct {
 }
 
 type hsm[T Instance] struct {
-	behavior   behavior[T]
-	context    context.Context
-	state      atomic.Value
-	model      *Model
-	active     sync.Map
+	behavior behavior[T]
+	context  context.Context
+	state    atomic.Value
+	model    *Model
+	active   map[string]*active
+	// mutex      sync.RWMutex
 	queue      queue
 	instance   T
 	timeouts   timeouts
@@ -1521,7 +1521,7 @@ var Keys = struct {
 //	    },
 //	    Id: "my-hsm-1",
 //	})
-func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config) T {
+func Start[T Instance](ctx context.Context, sm T, model *Model, maybeConfig ...Config) T {
 	hsm := &hsm[T]{
 		behavior: behavior[T]{
 			element: element{
@@ -1532,15 +1532,17 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 		instance: sm,
 		queue:    queue{},
 		context:  ctx,
+		active:   map[string]*active{},
 	}
 	hsm.state.Store(&model.state)
 	initialEvent := InitialEvent
 	hsm.processing.lock()
-	if len(config) > 0 {
-		hsm.behavior.id = config[0].ID
-		hsm.timeouts.terminate = config[0].ActivityTimeout
-		hsm.behavior.qualifiedName = config[0].Name
-		initialEvent = initialEvent.WithData(config[0].Data)
+	if len(maybeConfig) > 0 {
+		config := maybeConfig[0]
+		hsm.behavior.id = config.ID
+		hsm.timeouts.activity = config.ActivityTimeout
+		hsm.behavior.qualifiedName = config.Name
+		initialEvent = initialEvent.WithData(config.Data)
 	}
 	if hsm.behavior.id == "" {
 		hsm.behavior.id = muid.Make().String()
@@ -1548,8 +1550,8 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 	if hsm.behavior.qualifiedName == "" {
 		hsm.behavior.qualifiedName = model.QualifiedName()
 	}
-	if hsm.timeouts.terminate == 0 {
-		hsm.timeouts.terminate = time.Millisecond
+	if hsm.timeouts.activity == 0 {
+		hsm.timeouts.activity = time.Millisecond
 	}
 	hsm.behavior.operation = func(ctx context.Context, _ T, event Event) {
 		hsm.state.Store(hsm.enter(ctx, &hsm.model.state, &event, true))
@@ -1613,8 +1615,8 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Default().Error("panic in stop", "error", r)
-				close(signal)
 			}
+			close(signal)
 		}()
 		sm.processing.lock()
 
@@ -1634,10 +1636,12 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
-		if maybeActive, ok := sm.active.Load(sm.behavior.qualifiedName); ok {
-			maybeActive.(*active).cancel()
+		// sm.mutex.Lock()
+		if maybeActive, ok := sm.active[sm.behavior.qualifiedName]; ok {
+			maybeActive.cancel()
 		}
-		sm.active = sync.Map{}
+		clear(sm.active)
+		// sm.mutex.Unlock()
 		if instancesPointer, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance]); ok {
 			deleteFunc := func(instance Instance) bool {
 				return instance == sm
@@ -1653,7 +1657,6 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 				}
 			}
 		}
-		close(signal)
 		sm.processing.unlock()
 	}()
 	return signal
@@ -1678,16 +1681,33 @@ func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *
 		return nil
 	}
 	qualifiedName := element.QualifiedName()
-	maybeActive, ok := sm.active.Load(qualifiedName)
+	// sm.mutex.Lock()
+	// defer sm.mutex.Unlock()
+	maybeActive, ok := sm.active[qualifiedName]
 	if !ok {
 		maybeActive = &active{
 			channel: make(chan struct{}, 1),
 		}
-		maybeActive, _ = sm.active.LoadOrStore(qualifiedName, maybeActive)
+		sm.active[qualifiedName] = maybeActive
 	}
-	active := maybeActive.(*active)
-	active.subcontext, active.cancel = context.WithCancel(ctx)
-	return active
+	maybeActive.subcontext, maybeActive.cancel = context.WithCancel(ctx)
+	return maybeActive
+}
+
+func (sm *hsm[T]) executeAll(ctx context.Context, names []string, event *Event) {
+	for _, qualifiedName := range names {
+		if behavior := get[*behavior[T]](sm.model, qualifiedName); behavior != nil {
+			sm.execute(ctx, behavior, event)
+		}
+	}
+}
+
+func (sm *hsm[T]) terminateAll(ctx context.Context, names []string) {
+	for _, qualifiedName := range names {
+		if behavior := get[*behavior[T]](sm.model, qualifiedName); behavior != nil {
+			sm.terminate(ctx, behavior)
+		}
+	}
 }
 
 func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, event *Event, defaultEntry bool) elements.NamedElement {
@@ -1703,13 +1723,7 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 			}
 		}
 		if len(state.activities) > 0 {
-			go func() {
-				for _, activity := range state.activities {
-					if activity := get[*behavior[T]](sm.model, activity); activity != nil {
-						sm.execute(ctx, activity, event)
-					}
-				}
-			}()
+			sm.executeAll(ctx, state.activities, event)
 		}
 		if !defaultEntry || state.initial == "" {
 			return state
@@ -1748,6 +1762,9 @@ func (sm *hsm[T]) exit(ctx context.Context, element elements.NamedElement, event
 		return
 	}
 	if state, ok := element.(*state); ok {
+		// if len(state.activities) > 0 {
+		// 	sm.terminateAll(ctx, state.activities)
+		// }
 		for _, activity := range state.activities {
 			if activity := get[*behavior[T]](sm.model, activity); activity != nil {
 				sm.terminate(ctx, activity)
@@ -1849,15 +1866,17 @@ func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) 
 	if sm == nil || element == nil {
 		return
 	}
-	maybeActive, ok := sm.active.Load(element.QualifiedName())
+	// sm.mutex.Lock()
+	maybeActive, ok := sm.active[element.QualifiedName()]
 	if !ok {
+		// sm.mutex.Unlock()
 		return
 	}
-	active := maybeActive.(*active)
-	active.cancel()
+	maybeActive.cancel()
+	// sm.mutex.Unlock()
 	select {
-	case <-active.channel:
-	case <-time.After(sm.timeouts.terminate):
+	case <-maybeActive.channel:
+	case <-time.After(sm.timeouts.activity):
 		go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("terminate timeout: %s", element.QualifiedName())))
 	}
 
