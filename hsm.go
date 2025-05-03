@@ -1478,7 +1478,7 @@ type hsm[T Instance] struct {
 	context    context.Context
 	state      atomic.Value
 	model      *Model
-	active     map[string]*active
+	active     sync.Map
 	queue      queue
 	instance   T
 	timeouts   timeouts
@@ -1488,8 +1488,8 @@ type hsm[T Instance] struct {
 
 // Config provides configuration options for state machine initialization.
 type Config struct {
-	// Id is a unique identifier for the state machine instance.
-	Id string
+	// ID is a unique identifier for the state machine instance.
+	ID string
 	// ActivityTimeout is the timeout for the state activity to terminate.
 	ActivityTimeout time.Duration
 	// Name is the name of the state machine.
@@ -1529,7 +1529,6 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 			},
 		},
 		model:    model,
-		active:   map[string]*active{},
 		instance: sm,
 		queue:    queue{},
 		context:  ctx,
@@ -1538,7 +1537,7 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 	initialEvent := InitialEvent
 	hsm.processing.lock()
 	if len(config) > 0 {
-		hsm.behavior.id = config[0].Id
+		hsm.behavior.id = config[0].ID
 		hsm.timeouts.terminate = config[0].ActivityTimeout
 		hsm.behavior.qualifiedName = config[0].Name
 		initialEvent = initialEvent.WithData(config[0].Data)
@@ -1635,10 +1634,10 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
-		if active, ok := sm.active[sm.behavior.qualifiedName]; ok {
-			active.cancel()
+		if maybeActive, ok := sm.active.Load(sm.behavior.qualifiedName); ok {
+			maybeActive.(*active).cancel()
 		}
-		clear(sm.active)
+		sm.active = sync.Map{}
 		if instancesPointer, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance]); ok {
 			deleteFunc := func(instance Instance) bool {
 				return instance == sm
@@ -1679,15 +1678,16 @@ func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *
 		return nil
 	}
 	qualifiedName := element.QualifiedName()
-	current, ok := sm.active[qualifiedName]
+	maybeActive, ok := sm.active.Load(qualifiedName)
 	if !ok {
-		current = &active{
+		maybeActive = &active{
 			channel: make(chan struct{}, 1),
 		}
-		sm.active[qualifiedName] = current
+		maybeActive, _ = sm.active.LoadOrStore(qualifiedName, maybeActive)
 	}
-	current.subcontext, current.cancel = context.WithCancel(ctx)
-	return current
+	active := maybeActive.(*active)
+	active.subcontext, active.cancel = context.WithCancel(ctx)
+	return active
 }
 
 func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, event *Event, defaultEntry bool) elements.NamedElement {
@@ -1849,10 +1849,11 @@ func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) 
 	if sm == nil || element == nil {
 		return
 	}
-	active, ok := sm.active[element.QualifiedName()]
+	maybeActive, ok := sm.active.Load(element.QualifiedName())
 	if !ok {
 		return
 	}
+	active := maybeActive.(*active)
 	active.cancel()
 	select {
 	case <-active.channel:

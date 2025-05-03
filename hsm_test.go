@@ -217,7 +217,7 @@ func TestHSM(t *testing.T) {
 		foo: 0,
 	}, &model, hsm.Config{
 		Name: "TestHSM",
-		Id:   "test",
+		ID:   "test",
 	})
 	plantuml.Generate(os.Stdout, &model)
 	if sm.State() != "/s/s2/s21/s211" {
@@ -562,8 +562,8 @@ func TestDispatchTo(t *testing.T) {
 		hsm.Initial(hsm.Target("foo")),
 	)
 	ctx := context.Background()
-	sm1 := hsm.Start(ctx, &THSM{}, &model, hsm.Config{Id: "sm1"})
-	sm2 := hsm.Start(sm1.Context(), &THSM{}, &model, hsm.Config{Id: "sm2"})
+	sm1 := hsm.Start(ctx, &THSM{}, &model, hsm.Config{ID: "sm1"})
+	sm2 := hsm.Start(sm1.Context(), &THSM{}, &model, hsm.Config{ID: "sm2"})
 	if sm1.State() != "/foo" {
 		t.Fatal("state is not correct", "state", sm1.State())
 	}
