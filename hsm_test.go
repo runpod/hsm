@@ -704,10 +704,16 @@ func TestLCA(t *testing.T) {
 // }
 var benchModel = hsm.Define(
 	"TestHSM",
-	hsm.State("foo", hsm.Entry(noBehavior),
-		hsm.Exit(noBehavior)),
-	hsm.State("bar", hsm.Entry(noBehavior),
-		hsm.Exit(noBehavior)),
+	hsm.State("foo",
+		hsm.Entry(noBehavior),
+		hsm.Exit(noBehavior),
+		hsm.Activity(noBehavior),
+	),
+	hsm.State("bar",
+		hsm.Entry(noBehavior),
+		hsm.Exit(noBehavior),
+		hsm.Activity(noBehavior),
+	),
 	hsm.Transition(
 		hsm.On("foo"),
 		hsm.Source("foo"),
@@ -721,7 +727,6 @@ var benchModel = hsm.Define(
 		hsm.Effect(noBehavior),
 	),
 	hsm.Initial(hsm.Target("foo"), hsm.Effect(noBehavior)),
-	// hsm.Telemetry(provider.Tracer("github.com/stateforward/go-hsm")),
 )
 
 func TestCompletionEvent(t *testing.T) {
@@ -937,6 +942,32 @@ func nonHSMLogic() func(event *hsm.Event) bool {
 	initialEffect(nil)
 	fooEntry(nil)
 	return handleEvent
+}
+
+func TestWhen(t *testing.T) {
+	model := hsm.Define(
+		"TestWhenHSM",
+		hsm.Initial(hsm.Target("foo")),
+		hsm.State("foo",
+			hsm.Transition(
+				hsm.When(func(ctx context.Context, hsm *THSM, event hsm.Event) <-chan struct{} {
+					ch := make(chan struct{})
+					go func() {
+						time.Sleep(1 * time.Millisecond)
+						close(ch)
+					}()
+					return ch
+				}),
+				hsm.Target("../bar"),
+			),
+		),
+		hsm.State("bar"),
+	)
+	sm := hsm.Start(context.Background(), &THSM{}, &model)
+	time.Sleep(2 * time.Millisecond)
+	if sm.State() != "/bar" {
+		t.Fatalf("expected state to be bar, got %s", sm.State())
+	}
 }
 
 func TestStop(t *testing.T) {

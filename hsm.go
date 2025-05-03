@@ -400,7 +400,7 @@ func getFunctionName(fn any) string {
 	if fn == nil {
 		return ""
 	}
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	return path.Base(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
 }
 
 func hasWildcard(events ...string) bool {
@@ -1192,6 +1192,51 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 	}
 }
 
+func When[T Instance](expr func(ctx context.Context, hsm T, event Event) <-chan struct{}) RedefinableElement {
+	traceback := traceback()
+	name := getFunctionName(expr)
+	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+		owner, ok := find(stack, kind.Transition).(*transition)
+		if !ok {
+			traceback(fmt.Errorf("when must be called within a Transition"))
+		}
+		qualifiedName := path.Join(owner.QualifiedName(), name, strconv.Itoa(len(model.members)))
+		event := Event{
+			Kind: kind.TimeEvent,
+			Name: qualifiedName,
+		}
+		owner.events = append(owner.events, qualifiedName)
+		model.push(func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+			maybeSource, ok := model.members[owner.source]
+			if !ok {
+				traceback(fmt.Errorf("source \"%s\" for transition \"%s\" not found", owner.source, owner.QualifiedName()))
+			}
+			source, ok := maybeSource.(*state)
+			if !ok {
+				traceback(fmt.Errorf("when can only be used on transitions where the source is a State, not \"%s\"", maybeSource.QualifiedName()))
+			}
+			activity := &behavior[T]{
+				element: element{kind: kind.Concurrent, qualifiedName: path.Join(source.QualifiedName(), "activity", qualifiedName)},
+				operation: func(ctx context.Context, hsm T, _ Event) {
+					ch := expr(ctx, hsm, event)
+					for {
+						select {
+						case <-ch:
+							hsm.Dispatch(hsm.Context(), event)
+						case <-ctx.Done():
+							return
+						}
+					}
+				},
+			}
+			model.members[activity.QualifiedName()] = activity
+			source.activities = append(source.activities, activity.QualifiedName())
+			return owner
+		})
+		return owner
+	}
+}
+
 // Final creates a final state that represents the completion of a composite state or the entire state machine.
 // When a final state is entered, a completion event is generated.
 //
@@ -1349,6 +1394,7 @@ type Instance interface {
 	name() string
 	channels() *after
 	snapshot() Snapshot
+	wait() <-chan struct{}
 	start(ctx context.Context, instance Instance, event *Event)
 	stop(ctx context.Context) <-chan struct{}
 	restart(ctx context.Context, maybeData ...any) <-chan struct{}
@@ -1424,6 +1470,7 @@ type after struct {
 	exited     sync.Map
 	dispatched sync.Map
 	processed  sync.Map
+	activities sync.Map
 }
 
 type hsm[T Instance] struct {
@@ -1554,6 +1601,10 @@ func (sm *hsm[T]) restart(ctx context.Context, maybeData ...any) <-chan struct{}
 	return sm.processing.wait()
 }
 
+func (sm *hsm[T]) wait() <-chan struct{} {
+	return sm.processing.wait()
+}
+
 func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 	if sm == nil {
 		return closedChannel
@@ -1651,10 +1702,14 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 				sm.execute(ctx, entry, event)
 			}
 		}
-		for _, activity := range state.activities {
-			if activity := get[*behavior[T]](sm.model, activity); activity != nil {
-				sm.execute(ctx, activity, event)
-			}
+		if len(state.activities) > 0 {
+			go func() {
+				for _, activity := range state.activities {
+					if activity := get[*behavior[T]](sm.model, activity); activity != nil {
+						sm.execute(ctx, activity, event)
+					}
+				}
+			}()
 		}
 		if !defaultEntry || state.initial == "" {
 			return state
@@ -1711,7 +1766,6 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 	if sm == nil || element == nil {
 		return
 	}
-
 	switch element.Kind() {
 	case kind.Concurrent:
 		ctx := sm.activate(sm.context, element)
@@ -1719,6 +1773,9 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 			defer func() {
 				if r := recover(); r != nil {
 					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
+				}
+				if ch, ok := sm.after.activities.LoadAndDelete(element.QualifiedName()); ok {
+					close(ch.(chan struct{}))
 				}
 			}()
 			element.operation(ctx, sm.instance, event)
@@ -2047,9 +2104,13 @@ func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
 	return signal
 }
 
-func AfterProcess(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
-	ch, _ := hsm.channels().processed.LoadOrStore(event.Name, make(chan struct{}))
-	return ch.(chan struct{})
+func AfterProcess(ctx context.Context, hsm Instance, maybeEvent ...Event) <-chan struct{} {
+	if len(maybeEvent) > 0 {
+		ch, _ := hsm.channels().processed.LoadOrStore(maybeEvent[0].Name, make(chan struct{}))
+		return ch.(chan struct{})
+	} else {
+		return hsm.wait()
+	}
 }
 
 func AfterDispatch(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
@@ -2064,6 +2125,11 @@ func AfterEntry(ctx context.Context, hsm Instance, state string) <-chan struct{}
 
 func AfterExit(ctx context.Context, hsm Instance, state string) <-chan struct{} {
 	ch, _ := hsm.channels().exited.LoadOrStore(state, make(chan struct{}))
+	return ch.(chan struct{})
+}
+
+func AfterActivity(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, _ := hsm.channels().activities.LoadOrStore(state, make(chan struct{}))
 	return ch.(chan struct{})
 }
 
