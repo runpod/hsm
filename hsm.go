@@ -8,7 +8,6 @@ import (
 	"path"
 	"reflect"
 	"runtime"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1376,6 +1375,7 @@ type Snapshot struct {
 	QualifiedName string
 	State         string
 	QueueLen      int
+	qualifiedID   string
 }
 
 // Instance represents an active state machine instance that can process events and track state.
@@ -1383,16 +1383,13 @@ type Snapshot struct {
 type Instance interface {
 	// State returns the current state's qualified name.
 	State() string
-	Context() context.Context
+	Context() *active
 	// Dispatch sends an event to the state machine and returns a channel that closes when processing completes.
 	Dispatch(ctx context.Context, event Event) <-chan struct{}
 
 	// non exported
-	id() string
-	qualifiedName() string
-	name() string
 	channels() *after
-	snapshot() Snapshot
+	takeSnapshot() Snapshot
 	wait() <-chan struct{}
 	start(ctx context.Context, instance Instance, event *Event)
 	stop(ctx context.Context) <-chan struct{}
@@ -1427,6 +1424,7 @@ type subcontext = context.Context
 
 type active struct {
 	subcontext
+	context context.Context
 	cancel  context.CancelFunc
 	channel chan struct{}
 }
@@ -1473,12 +1471,11 @@ type after struct {
 }
 
 type hsm[T Instance] struct {
-	behavior behavior[T]
-	context  context.Context
-	state    atomic.Value
-	model    *Model
-	active   map[string]*active
-	// mutex      sync.RWMutex
+	behavior[T]
+	state      atomic.Value
+	context    *active
+	model      *Model
+	active     map[string]*active
 	queue      queue
 	instance   T
 	timeouts   timeouts
@@ -1531,8 +1528,10 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, maybeConfig ...C
 		model:    model,
 		instance: sm,
 		queue:    queue{},
-		context:  ctx,
 		active:   map[string]*active{},
+		context: &active{
+			context: ctx,
+		},
 	}
 	hsm.state.Store(&model.state)
 	initialEvent := InitialEvent
@@ -1572,21 +1571,13 @@ func (sm *hsm[T]) State() string {
 	return state.QualifiedName()
 }
 
-func (sm *hsm[T]) start(_ context.Context, instance Instance, event *Event) {
-	all, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
+func (sm *hsm[T]) start(ctx context.Context, instance Instance, event *Event) {
+	instances, ok := ctx.Value(Keys.Instances).(*sync.Map)
 	if !ok {
-		all = &atomic.Pointer[[]Instance]{}
-		all.Store(&[]Instance{})
+		instances = &sync.Map{}
 	}
-	ctx := sm.activate(context.WithValue(context.WithValue(sm.context, Keys.Instances, all), Keys.HSM, sm), &sm.behavior)
-	sm.context = ctx
-	for {
-		allInstances := all.Load()
-		instances := append(*allInstances, sm)
-		if all.CompareAndSwap(allInstances, &instances) {
-			break
-		}
-	}
+	sm.context.subcontext, sm.context.cancel = context.WithCancel(context.WithValue(context.WithValue(ctx, Keys.Instances, instances), Keys.HSM, sm))
+	instances.Store(sm.behavior.id, sm)
 	sm.execute(sm.context, &sm.behavior, event)
 }
 
@@ -1636,33 +1627,18 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
-		// sm.mutex.Lock()
-		if maybeActive, ok := sm.active[sm.behavior.qualifiedName]; ok {
-			maybeActive.cancel()
-		}
+		sm.context.cancel()
 		clear(sm.active)
-		// sm.mutex.Unlock()
-		if instancesPointer, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance]); ok {
-			deleteFunc := func(instance Instance) bool {
-				return instance == sm
-			}
-			for {
-				allInstances := instancesPointer.Load()
-				if allInstances == nil {
-					break
-				}
-				instances := slices.DeleteFunc(*allInstances, deleteFunc)
-				if instancesPointer.CompareAndSwap(allInstances, &instances) {
-					break
-				}
-			}
+		if instances, ok := sm.context.Value(Keys.Instances).(*sync.Map); ok {
+			instances.Delete(sm.behavior.id)
 		}
+
 		sm.processing.unlock()
 	}()
 	return signal
 }
 
-func (sm *hsm[T]) Context() context.Context {
+func (sm *hsm[T]) Context() *active {
 	if sm == nil {
 		return nil
 	}
@@ -1681,8 +1657,6 @@ func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *
 		return nil
 	}
 	qualifiedName := element.QualifiedName()
-	// sm.mutex.Lock()
-	// defer sm.mutex.Unlock()
 	maybeActive, ok := sm.active[qualifiedName]
 	if !ok {
 		maybeActive = &active{
@@ -1698,14 +1672,6 @@ func (sm *hsm[T]) executeAll(ctx context.Context, names []string, event *Event) 
 	for _, qualifiedName := range names {
 		if behavior := get[*behavior[T]](sm.model, qualifiedName); behavior != nil {
 			sm.execute(ctx, behavior, event)
-		}
-	}
-}
-
-func (sm *hsm[T]) terminateAll(ctx context.Context, names []string) {
-	for _, qualifiedName := range names {
-		if behavior := get[*behavior[T]](sm.model, qualifiedName); behavior != nil {
-			sm.terminate(ctx, behavior)
 		}
 	}
 }
@@ -1750,7 +1716,7 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 		}
 	case kind.FinalState:
 		if element.Owner() == "/" {
-			sm.terminate(ctx, &sm.behavior)
+			sm.context.cancel()
 		}
 		return element
 	}
@@ -1953,7 +1919,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 	sm.queue.push(deferred...)
 }
 
-func (sm *hsm[T]) snapshot() Snapshot {
+func (sm *hsm[T]) takeSnapshot() Snapshot {
 	if sm == nil {
 		return Snapshot{}
 	}
@@ -1990,18 +1956,6 @@ func (sm *hsm[T]) Dispatch(ctx context.Context, event Event) <-chan struct{} {
 	return sm.processing.wait()
 }
 
-func (sm *hsm[T]) id() string {
-	return sm.behavior.id
-}
-
-func (sm *hsm[T]) qualifiedName() string {
-	return sm.behavior.qualifiedName
-}
-
-func (sm *hsm[T]) name() string {
-	return sm.behavior.Name()
-}
-
 // Dispatch sends an event to a specific state machine instance.
 // Returns a channel that closes when the event has been fully processed.
 //
@@ -2035,24 +1989,21 @@ func DispatchAll(ctx context.Context, event Event) <-chan struct{} {
 }
 
 func DispatchTo(ctx context.Context, event Event, maybeIds ...string) <-chan struct{} {
-	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
-	if !ok || instancesPointer == nil {
+	instances, ok := ctx.Value(Keys.Instances).(*sync.Map)
+	if !ok || instances == nil {
 		return closedChannel
 	}
 	signal := make(chan struct{})
-	instances := instancesPointer.Load()
-	if instances == nil {
-		close(signal)
-		return signal
-	}
 	go func(signal chan struct{}) {
 		defer close(signal)
-		signals := make(map[int]<-chan struct{}, len(*instances))
-		for i, sm := range *instances {
-			if len(maybeIds) == 0 || Match(sm.id(), maybeIds...) {
-				signals[i] = sm.Dispatch(ctx, event)
+		signals := make(map[string]<-chan struct{})
+		instances.Range(func(key, value any) bool {
+			snapshot := value.(Instance).takeSnapshot()
+			if len(maybeIds) == 0 || Match(snapshot.ID, maybeIds...) {
+				signals[key.(string)] = value.(Instance).Dispatch(ctx, event)
 			}
-		}
+			return true
+		})
 		for len(signals) > 0 {
 			for i, ch := range signals {
 				select {
@@ -2072,19 +2023,12 @@ func Propagate(ctx context.Context, event Event) <-chan struct{} {
 	if !ok {
 		return closedChannel
 	}
-	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
-	if !ok || instancesPointer == nil {
+	active := hsm.Context()
+	owner, ok := FromContext(active.context)
+	if !ok {
 		return closedChannel
 	}
-	instances := instancesPointer.Load()
-	if instances == nil {
-		return closedChannel
-	}
-	index := slices.Index(*instances, hsm)
-	if index == -1 || index == 0 {
-		return closedChannel
-	}
-	return (*instances)[index-1].Dispatch(ctx, event)
+	return owner.Dispatch(ctx, event)
 }
 
 func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
@@ -2092,23 +2036,14 @@ func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
 	if !ok {
 		return closedChannel
 	}
-	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
-	if !ok || instancesPointer == nil {
-		return closedChannel
-	}
-	instances := instancesPointer.Load()
-	if instances == nil {
-		return closedChannel
-	}
 	signal := make(chan struct{})
 	go func() {
 		defer close(signal)
-		signals := make(map[int]<-chan struct{}, len(*instances))
-		for i, instance := range *instances {
-			if instance == hsm {
-				break
-			}
-			signals[i] = instance.Dispatch(ctx, event)
+		signals := make(map[any]<-chan struct{})
+		active, ok := FromContext(hsm.Context().context)
+		for ok {
+			signals[active] = active.Dispatch(ctx, event)
+			active, ok = FromContext(active.Context().context)
 		}
 		for len(signals) > 0 {
 			for i, ch := range signals {
@@ -2170,11 +2105,16 @@ func FromContext(ctx context.Context) (Instance, bool) {
 }
 
 func InstancesFromContext(ctx context.Context) ([]Instance, bool) {
-	instancesPointer, ok := ctx.Value(Keys.Instances).(*atomic.Pointer[[]Instance])
+	instancesPointer, ok := ctx.Value(Keys.Instances).(*sync.Map)
 	if !ok || instancesPointer == nil {
 		return nil, false
 	}
-	return *instancesPointer.Load(), true
+	instances := make([]Instance, 0)
+	instancesPointer.Range(func(key, value any) bool {
+		instances = append(instances, value.(Instance))
+		return true
+	})
+	return instances, true
 }
 
 // Stop gracefully stops a state machine instance.
@@ -2194,17 +2134,20 @@ func Restart(ctx context.Context, hsm Instance, maybeData ...any) <-chan struct{
 }
 
 func ID(hsm Instance) string {
-	return hsm.id()
+	snapshot := hsm.takeSnapshot()
+	return snapshot.ID
 }
 
 func QualifiedName(hsm Instance) string {
-	return hsm.qualifiedName()
+	snapshot := hsm.takeSnapshot()
+	return snapshot.QualifiedName
 }
 
 func Name(hsm Instance) string {
-	return hsm.name()
+	snapshot := hsm.takeSnapshot()
+	return path.Base(snapshot.QualifiedName)
 }
 
 func TakeSnapshot(ctx context.Context, hsm Instance) Snapshot {
-	return hsm.snapshot()
+	return hsm.takeSnapshot()
 }

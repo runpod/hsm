@@ -79,5 +79,5 @@ type Constraint interface {
 
 type Behavior interface {
 	NamedElement
-	Action() any
+	Operation() any
 }
