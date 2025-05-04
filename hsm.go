@@ -262,45 +262,44 @@ var closedChannel = func() chan struct{} {
 }()
 
 type queue struct {
-	mutex sync.RWMutex
-	front []Event
-	back  []Event
+	mutex            sync.RWMutex
+	completionEvents []Event // lifo
+	events           []Event // fifo
 }
+
+var empty = Event{}
 
 func (q *queue) len() int {
 	q.mutex.RLock()
 	defer q.mutex.RUnlock()
-	return len(q.back)
+	return len(q.events) + len(q.completionEvents)
 }
 
 func (q *queue) pop() (Event, bool) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
-	var event Event
-	if len(q.back) == 0 && len(q.front) == 0 {
-		return event, false
-	}
-	if len(q.front) > 0 {
-		event = q.front[0]
-		q.front = q.front[:len(q.front)-1]
+	switch {
+	case len(q.completionEvents) > 0:
+		event := q.completionEvents[len(q.completionEvents)-1]
+		q.completionEvents = q.completionEvents[:len(q.completionEvents)-1]
 		return event, true
-	} else {
-		event = q.back[0]
-		q.back = q.back[:len(q.back)-1]
+	case len(q.events) > 0:
+		event := q.events[0]
+		q.events = q.events[1:]
 		return event, true
+	default:
+		return empty, false
 	}
 }
 
 func (q *queue) push(events ...Event) {
+	q.mutex.Lock()
+	defer q.mutex.Unlock()
 	for _, event := range events {
 		if kind.IsKind(event.Kind, kind.CompletionEvent) {
-			q.mutex.Lock()
-			q.front = append(q.front, event)
-			q.mutex.Unlock()
+			q.completionEvents = append(q.completionEvents, event)
 		} else {
-			q.mutex.Lock()
-			q.back = append(q.back, event)
-			q.mutex.Unlock()
+			q.events = append(q.events, event)
 		}
 	}
 }
@@ -400,7 +399,7 @@ func getFunctionName(fn any) string {
 	if fn == nil {
 		return ""
 	}
-	return runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	return path.Base(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
 }
 
 func hasWildcard(events ...string) bool {
@@ -1192,6 +1191,51 @@ func Every[T Instance](expr func(ctx context.Context, hsm T, event Event) time.D
 	}
 }
 
+func When[T Instance](expr func(ctx context.Context, hsm T, event Event) <-chan struct{}) RedefinableElement {
+	traceback := traceback()
+	name := getFunctionName(expr)
+	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+		owner, ok := find(stack, kind.Transition).(*transition)
+		if !ok {
+			traceback(fmt.Errorf("when must be called within a Transition"))
+		}
+		qualifiedName := path.Join(owner.QualifiedName(), name, strconv.Itoa(len(model.members)))
+		event := Event{
+			Kind: kind.TimeEvent,
+			Name: qualifiedName,
+		}
+		owner.events = append(owner.events, qualifiedName)
+		model.push(func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+			maybeSource, ok := model.members[owner.source]
+			if !ok {
+				traceback(fmt.Errorf("source \"%s\" for transition \"%s\" not found", owner.source, owner.QualifiedName()))
+			}
+			source, ok := maybeSource.(*state)
+			if !ok {
+				traceback(fmt.Errorf("when can only be used on transitions where the source is a State, not \"%s\"", maybeSource.QualifiedName()))
+			}
+			activity := &behavior[T]{
+				element: element{kind: kind.Concurrent, qualifiedName: path.Join(source.QualifiedName(), "activity", qualifiedName)},
+				operation: func(ctx context.Context, hsm T, _ Event) {
+					ch := expr(ctx, hsm, event)
+					for {
+						select {
+						case <-ch:
+							hsm.Dispatch(hsm.Context(), event)
+						case <-ctx.Done():
+							return
+						}
+					}
+				},
+			}
+			model.members[activity.QualifiedName()] = activity
+			source.activities = append(source.activities, activity.QualifiedName())
+			return owner
+		})
+		return owner
+	}
+}
+
 // Final creates a final state that represents the completion of a composite state or the entire state machine.
 // When a final state is entered, a completion event is generated.
 //
@@ -1349,6 +1393,7 @@ type Instance interface {
 	name() string
 	channels() *after
 	snapshot() Snapshot
+	wait() <-chan struct{}
 	start(ctx context.Context, instance Instance, event *Event)
 	stop(ctx context.Context) <-chan struct{}
 	restart(ctx context.Context, maybeData ...any) <-chan struct{}
@@ -1387,7 +1432,7 @@ type active struct {
 }
 
 type timeouts struct {
-	terminate time.Duration
+	activity time.Duration
 }
 
 type mutex struct {
@@ -1424,14 +1469,16 @@ type after struct {
 	exited     sync.Map
 	dispatched sync.Map
 	processed  sync.Map
+	activities sync.Map
 }
 
 type hsm[T Instance] struct {
-	behavior   behavior[T]
-	context    context.Context
-	state      atomic.Value
-	model      *Model
-	active     map[string]*active
+	behavior behavior[T]
+	context  context.Context
+	state    atomic.Value
+	model    *Model
+	active   map[string]*active
+	// mutex      sync.RWMutex
 	queue      queue
 	instance   T
 	timeouts   timeouts
@@ -1441,8 +1488,8 @@ type hsm[T Instance] struct {
 
 // Config provides configuration options for state machine initialization.
 type Config struct {
-	// Id is a unique identifier for the state machine instance.
-	Id string
+	// ID is a unique identifier for the state machine instance.
+	ID string
 	// ActivityTimeout is the timeout for the state activity to terminate.
 	ActivityTimeout time.Duration
 	// Name is the name of the state machine.
@@ -1474,7 +1521,7 @@ var Keys = struct {
 //	    },
 //	    Id: "my-hsm-1",
 //	})
-func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config) T {
+func Start[T Instance](ctx context.Context, sm T, model *Model, maybeConfig ...Config) T {
 	hsm := &hsm[T]{
 		behavior: behavior[T]{
 			element: element{
@@ -1482,19 +1529,20 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 			},
 		},
 		model:    model,
-		active:   map[string]*active{},
 		instance: sm,
 		queue:    queue{},
 		context:  ctx,
+		active:   map[string]*active{},
 	}
 	hsm.state.Store(&model.state)
 	initialEvent := InitialEvent
 	hsm.processing.lock()
-	if len(config) > 0 {
-		hsm.behavior.id = config[0].Id
-		hsm.timeouts.terminate = config[0].ActivityTimeout
-		hsm.behavior.qualifiedName = config[0].Name
-		initialEvent = initialEvent.WithData(config[0].Data)
+	if len(maybeConfig) > 0 {
+		config := maybeConfig[0]
+		hsm.behavior.id = config.ID
+		hsm.timeouts.activity = config.ActivityTimeout
+		hsm.behavior.qualifiedName = config.Name
+		initialEvent = initialEvent.WithData(config.Data)
 	}
 	if hsm.behavior.id == "" {
 		hsm.behavior.id = muid.Make().String()
@@ -1502,8 +1550,8 @@ func Start[T Instance](ctx context.Context, sm T, model *Model, config ...Config
 	if hsm.behavior.qualifiedName == "" {
 		hsm.behavior.qualifiedName = model.QualifiedName()
 	}
-	if hsm.timeouts.terminate == 0 {
-		hsm.timeouts.terminate = time.Millisecond
+	if hsm.timeouts.activity == 0 {
+		hsm.timeouts.activity = time.Millisecond
 	}
 	hsm.behavior.operation = func(ctx context.Context, _ T, event Event) {
 		hsm.state.Store(hsm.enter(ctx, &hsm.model.state, &event, true))
@@ -1554,6 +1602,10 @@ func (sm *hsm[T]) restart(ctx context.Context, maybeData ...any) <-chan struct{}
 	return sm.processing.wait()
 }
 
+func (sm *hsm[T]) wait() <-chan struct{} {
+	return sm.processing.wait()
+}
+
 func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 	if sm == nil {
 		return closedChannel
@@ -1563,8 +1615,8 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Default().Error("panic in stop", "error", r)
-				close(signal)
 			}
+			close(signal)
 		}()
 		sm.processing.lock()
 
@@ -1584,10 +1636,12 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 			}
 			break
 		}
-		if active, ok := sm.active[sm.behavior.qualifiedName]; ok {
-			active.cancel()
+		// sm.mutex.Lock()
+		if maybeActive, ok := sm.active[sm.behavior.qualifiedName]; ok {
+			maybeActive.cancel()
 		}
 		clear(sm.active)
+		// sm.mutex.Unlock()
 		if instancesPointer, ok := sm.context.Value(Keys.Instances).(*atomic.Pointer[[]Instance]); ok {
 			deleteFunc := func(instance Instance) bool {
 				return instance == sm
@@ -1603,7 +1657,6 @@ func (sm *hsm[T]) stop(ctx context.Context) <-chan struct{} {
 				}
 			}
 		}
-		close(signal)
 		sm.processing.unlock()
 	}()
 	return signal
@@ -1628,15 +1681,33 @@ func (sm *hsm[T]) activate(ctx context.Context, element elements.NamedElement) *
 		return nil
 	}
 	qualifiedName := element.QualifiedName()
-	current, ok := sm.active[qualifiedName]
+	// sm.mutex.Lock()
+	// defer sm.mutex.Unlock()
+	maybeActive, ok := sm.active[qualifiedName]
 	if !ok {
-		current = &active{
+		maybeActive = &active{
 			channel: make(chan struct{}, 1),
 		}
-		sm.active[qualifiedName] = current
+		sm.active[qualifiedName] = maybeActive
 	}
-	current.subcontext, current.cancel = context.WithCancel(ctx)
-	return current
+	maybeActive.subcontext, maybeActive.cancel = context.WithCancel(ctx)
+	return maybeActive
+}
+
+func (sm *hsm[T]) executeAll(ctx context.Context, names []string, event *Event) {
+	for _, qualifiedName := range names {
+		if behavior := get[*behavior[T]](sm.model, qualifiedName); behavior != nil {
+			sm.execute(ctx, behavior, event)
+		}
+	}
+}
+
+func (sm *hsm[T]) terminateAll(ctx context.Context, names []string) {
+	for _, qualifiedName := range names {
+		if behavior := get[*behavior[T]](sm.model, qualifiedName); behavior != nil {
+			sm.terminate(ctx, behavior)
+		}
+	}
 }
 
 func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, event *Event, defaultEntry bool) elements.NamedElement {
@@ -1651,10 +1722,8 @@ func (sm *hsm[T]) enter(ctx context.Context, element elements.NamedElement, even
 				sm.execute(ctx, entry, event)
 			}
 		}
-		for _, activity := range state.activities {
-			if activity := get[*behavior[T]](sm.model, activity); activity != nil {
-				sm.execute(ctx, activity, event)
-			}
+		if len(state.activities) > 0 {
+			sm.executeAll(ctx, state.activities, event)
 		}
 		if !defaultEntry || state.initial == "" {
 			return state
@@ -1693,6 +1762,9 @@ func (sm *hsm[T]) exit(ctx context.Context, element elements.NamedElement, event
 		return
 	}
 	if state, ok := element.(*state); ok {
+		// if len(state.activities) > 0 {
+		// 	sm.terminateAll(ctx, state.activities)
+		// }
 		for _, activity := range state.activities {
 			if activity := get[*behavior[T]](sm.model, activity); activity != nil {
 				sm.terminate(ctx, activity)
@@ -1711,7 +1783,6 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 	if sm == nil || element == nil {
 		return
 	}
-
 	switch element.Kind() {
 	case kind.Concurrent:
 		ctx := sm.activate(sm.context, element)
@@ -1719,6 +1790,9 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 			defer func() {
 				if r := recover(); r != nil {
 					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
+				}
+				if ch, ok := sm.after.activities.LoadAndDelete(element.QualifiedName()); ok {
+					close(ch.(chan struct{}))
 				}
 			}()
 			element.operation(ctx, sm.instance, event)
@@ -1792,14 +1866,17 @@ func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) 
 	if sm == nil || element == nil {
 		return
 	}
-	active, ok := sm.active[element.QualifiedName()]
+	// sm.mutex.Lock()
+	maybeActive, ok := sm.active[element.QualifiedName()]
 	if !ok {
+		// sm.mutex.Unlock()
 		return
 	}
-	active.cancel()
+	maybeActive.cancel()
+	// sm.mutex.Unlock()
 	select {
-	case <-active.channel:
-	case <-time.After(sm.timeouts.terminate):
+	case <-maybeActive.channel:
+	case <-time.After(sm.timeouts.activity):
 		go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("terminate timeout: %s", element.QualifiedName())))
 	}
 
@@ -2047,9 +2124,13 @@ func PropagateAll(ctx context.Context, event Event) <-chan struct{} {
 	return signal
 }
 
-func AfterProcess(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
-	ch, _ := hsm.channels().processed.LoadOrStore(event.Name, make(chan struct{}))
-	return ch.(chan struct{})
+func AfterProcess(ctx context.Context, hsm Instance, maybeEvent ...Event) <-chan struct{} {
+	if len(maybeEvent) > 0 {
+		ch, _ := hsm.channels().processed.LoadOrStore(maybeEvent[0].Name, make(chan struct{}))
+		return ch.(chan struct{})
+	} else {
+		return hsm.wait()
+	}
 }
 
 func AfterDispatch(ctx context.Context, hsm Instance, event Event) <-chan struct{} {
@@ -2064,6 +2145,11 @@ func AfterEntry(ctx context.Context, hsm Instance, state string) <-chan struct{}
 
 func AfterExit(ctx context.Context, hsm Instance, state string) <-chan struct{} {
 	ch, _ := hsm.channels().exited.LoadOrStore(state, make(chan struct{}))
+	return ch.(chan struct{})
+}
+
+func AfterActivity(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, _ := hsm.channels().activities.LoadOrStore(state, make(chan struct{}))
 	return ch.(chan struct{})
 }
 
