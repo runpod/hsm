@@ -844,6 +844,9 @@ func TestMatch(t *testing.T) {
 	if !hsm.Match("abcdef", "a*f") {
 		t.Fatal("expected match for abcdef, a*f")
 	}
+	if !hsm.Match("/initialized/starting", "/initialized/starting") {
+		t.Fatal("expected match for /initialized/starting, /initialized/starting")
+	}
 	if !hsm.Match("abcdef", "*f") {
 		t.Fatal("expected match for abcdef, *f")
 	}
