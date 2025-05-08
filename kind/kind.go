@@ -83,7 +83,6 @@ type kinds struct {
 	Concurrent      uint64
 	StateMachine    uint64
 	Namespace       uint64
-	Attribute       uint64
 	State           uint64
 	Transition      uint64
 	Internal        uint64
@@ -93,13 +92,12 @@ type kinds struct {
 	Event           uint64
 	CompletionEvent uint64
 	ErrorEvent      uint64
-
-	TimeEvent   uint64
-	Pseudostate uint64
-	Initial     uint64
-	FinalState  uint64
-	Choice      uint64
-	Custom      uint64
+	TimeEvent       uint64
+	Pseudostate     uint64
+	Initial         uint64
+	FinalState      uint64
+	Choice          uint64
+	Custom          uint64
 }
 
 var (
@@ -107,7 +105,6 @@ var (
 	Null            = Kind(id.Next())
 	Element         = Kind(id.Next())
 	Namespace       = Kind(id.Next(), Element)
-	Attribute       = Kind(id.Next(), Element)
 	Vertex          = Kind(id.Next(), Element)
 	Constraint      = Kind(id.Next(), Element)
 	Behavior        = Kind(id.Next(), Element)
@@ -141,7 +138,6 @@ var Kinds = sync.OnceValue(func() (kinds kinds) {
 	kinds.State = State
 	kinds.Transition = Transition
 	kinds.Namespace = Namespace
-	kinds.Attribute = Attribute
 	kinds.Internal = Internal
 	kinds.External = External
 	kinds.Local = Local

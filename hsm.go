@@ -8,7 +8,7 @@ import (
 	"path"
 	"reflect"
 	"runtime"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -241,19 +241,6 @@ var (
 	InfiniteDuration = time.Duration(-1)
 )
 
-type DecodedEvent[T any] struct {
-	Event
-	Data T
-}
-
-func DecodeEvent[T any](event Event) (DecodedEvent[T], bool) {
-	data, ok := event.Data.(T)
-	return DecodedEvent[T]{
-		Event: event,
-		Data:  data,
-	}, ok
-}
-
 var closedChannel = func() chan struct{} {
 	done := make(chan struct{})
 	close(done)
@@ -441,21 +428,27 @@ func State(name string, partialElements ...RedefinableElement) RedefinableElemen
 		apply(model, stack, partialElements...)
 		model.push(func(model *Model, stack []elements.NamedElement) elements.NamedElement {
 			// Sort transitions so wildcard events are at the end
-			sort.SliceStable(element.transitions, func(i, j int) bool {
-				transitionI := get[*transition](model, element.transitions[i])
+			slices.SortStableFunc(element.transitions, func(i, j string) int {
+				transitionI := get[*transition](model, i)
 				if transitionI == nil {
-					traceback(fmt.Errorf("missing transition \"%s\" for state \"%s\"", element.transitions[i], element.QualifiedName()))
-					return false
+					traceback(fmt.Errorf("missing transition \"%s\" for state \"%s\"", i, element.QualifiedName()))
+					return 1 // because the linter doesn't know that traceback will panic
 				}
-				transitionJ := get[*transition](model, element.transitions[j])
+				transitionJ := get[*transition](model, j)
 				if transitionJ == nil {
-					traceback(fmt.Errorf("missing transition \"%s\" for state \"%s\"", element.transitions[j], element.QualifiedName()))
-					return false // because the linter doesn't know that traceback will panic
+					traceback(fmt.Errorf("missing transition \"%s\" for state \"%s\"", j, element.QualifiedName()))
+					return 1 // because the linter doesn't know that traceback will panic
 				}
 				// If j has wildcard and i doesn't, i comes first
 				hasWildcardI := hasWildcard(transitionI.events...)
 				hasWildcardJ := hasWildcard(transitionJ.events...)
-				return !hasWildcardI && hasWildcardJ
+				if hasWildcardI && !hasWildcardJ {
+					return -1
+				}
+				if !hasWildcardI && hasWildcardJ {
+					return 1
+				}
+				return 0
 			})
 			return element
 		})
@@ -1375,7 +1368,6 @@ type Snapshot struct {
 	QualifiedName string
 	State         string
 	QueueLen      int
-	qualifiedID   string
 }
 
 // Instance represents an active state machine instance that can process events and track state.
@@ -1901,13 +1893,15 @@ func (sm *hsm[T]) process(ctx context.Context) {
 					break
 				}
 				sm.state.Store(state)
+				if len(deferred) > 0 {
+					sm.queue.push(deferred...)
+					deferred = nil
+				}
 				break
 			}
-			for _, deferredEvent := range source.deferred {
-				if Match(event.Name, deferredEvent) {
-					deferred = append(deferred, event)
-					break
-				}
+			if len(source.deferred) > 0 && Match(event.Name, source.deferred...) {
+				deferred = append(deferred, event)
+				break
 			}
 			qualifiedName = source.Owner()
 		}
