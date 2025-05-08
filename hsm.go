@@ -443,10 +443,10 @@ func State(name string, partialElements ...RedefinableElement) RedefinableElemen
 				hasWildcardI := hasWildcard(transitionI.events...)
 				hasWildcardJ := hasWildcard(transitionJ.events...)
 				if hasWildcardI && !hasWildcardJ {
-					return -1
+					return 1 // Sort transitionI (wildcard) after transitionJ
 				}
 				if !hasWildcardI && hasWildcardJ {
-					return 1
+					return -1 // Sort transitionI (non-wildcard) before transitionJ
 				}
 				return 0
 			})
