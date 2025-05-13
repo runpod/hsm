@@ -1581,6 +1581,9 @@ func (sm *hsm[T]) restart(ctx context.Context, maybeData ...any) <-chan struct{}
 	<-sm.stop(ctx)
 	sm.processing.lock()
 	initialEvent := InitialEvent.WithData(data)
+	sm.context = &active{
+		context: ctx,
+	}
 	(*hsm[T])(sm).start(ctx, sm, &initialEvent)
 	return sm.processing.wait()
 }
@@ -1743,7 +1746,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 	}
 	switch element.Kind() {
 	case kind.Concurrent:
-		ctx := sm.activate(sm.context, element)
+		ctx := sm.activate(ctx, element)
 		go func(ctx *active, event Event) {
 			defer func() {
 				if r := recover(); r != nil {
