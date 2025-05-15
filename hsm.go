@@ -1747,7 +1747,7 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 	}
 	switch element.Kind() {
 	case kind.Concurrent:
-		ctx := sm.activate(ctx, element)
+		ctx := sm.activate(sm.context, element)
 		go func(ctx *active, event Event) {
 			defer func() {
 				if r := recover(); r != nil {
