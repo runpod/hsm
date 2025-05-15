@@ -1871,7 +1871,7 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 func (sm *hsm[T]) process(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			err := fmt.Errorf("hsm: panic while processing event in state machine: %v\n\n%s", r, debug.Stack())
+			err := fmt.Errorf("hsm: panic while processing event in state machine: %v\n\n%s", r, string(debug.Stack()))
 			go sm.Dispatch(ctx, ErrorEvent.WithData(err))
 		}
 		sm.processing.unlock()
