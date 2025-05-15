@@ -8,6 +8,7 @@ import (
 	"path"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -1870,7 +1871,10 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 func (sm *hsm[T]) process(ctx context.Context) {
 	defer func() {
 		if r := recover(); r != nil {
-			go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in state machine: %s", r)))
+			stack := string(debug.Stack())
+			err := fmt.Errorf("hsm: panic while processing event in state machine: %v", r)
+			slog.Default().Error(err.Error(), "stack", stack)
+			go sm.Dispatch(ctx, ErrorEvent.WithData(err))
 		}
 		sm.processing.unlock()
 	}()
