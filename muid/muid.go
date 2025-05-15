@@ -59,16 +59,10 @@ var (
 
 	// Global instance of sharded generators, initialized once.
 	defaultShards = sync.OnceValue(func() *shardedGenerators {
-		numCPU := runtime.NumCPU()
-		if numCPU <= 0 {
-			numCPU = 1 // Ensure at least one generator
-		}
+		numCPU := max(runtime.NumCPU(), 1)
 		shardBits := 0
 		if numCPU > 1 {
-			shardBits = int(math.Ceil(math.Log2(float64(numCPU))))
-			if shardBits > 5 {
-				shardBits = 5
-			}
+			shardBits = min(int(math.Ceil(math.Log2(float64(numCPU)))), 5)
 		}
 
 		// Get base config potentially containing the calculated MachineID
@@ -91,7 +85,7 @@ var (
 		}
 		return &shardedGenerators{
 			pool: pool,
-			size: uint64(numCPU),
+			size: uint64(1 << shardBits),
 		}
 	})
 
