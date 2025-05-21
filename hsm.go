@@ -148,6 +148,7 @@ type state struct {
 	exit       []string
 	activities []string
 	deferred   []string
+	regions    map[string]struct{}
 }
 
 func (state *state) Entry() []string {
@@ -160,6 +161,14 @@ func (state *state) Activities() []string {
 
 func (state *state) Exit() []string {
 	return state.exit
+}
+
+/******* Region *******/
+
+type region struct {
+	element
+	initial  string
+	vertices map[string]struct{}
 }
 
 /******* Transition *******/
@@ -509,6 +518,23 @@ func IsAncestor(current, target string) bool {
 		parent = path.Dir(parent)
 	}
 	return false
+}
+
+func Region(name string, partialElements ...RedefinableElement) RedefinableElement {
+	traceback := traceback()
+	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
+		owner := find(stack, kind.Namespace)
+		if owner == nil {
+			traceback(fmt.Errorf("region \"%s\" must be called within Define() or State()", name))
+		}
+		element := &region{
+			element: element{kind: kind.Region, qualifiedName: path.Join(owner.QualifiedName(), name)},
+		}
+		model.members[element.QualifiedName()] = element
+		stack = append(stack, element)
+		apply(model, stack, partialElements...)
+		return element
+	}
 }
 
 // Transition creates a new transition between states.
@@ -1460,7 +1486,7 @@ type after struct {
 	exited     sync.Map
 	dispatched sync.Map
 	processed  sync.Map
-	activities sync.Map
+	executed   sync.Map
 }
 
 type hsm[T Instance] struct {
@@ -1741,6 +1767,15 @@ func (sm *hsm[T]) exit(ctx context.Context, element elements.NamedElement, event
 
 }
 
+func cleanup[T Instance](ctx context.Context, sm *hsm[T], element elements.NamedElement) {
+	if r := recover(); r != nil {
+		go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
+	}
+	if ch, ok := sm.after.executed.LoadAndDelete(element.QualifiedName()); ok {
+		close(ch.(chan struct{}))
+	}
+}
+
 func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Event) {
 	if sm == nil || element == nil {
 		return
@@ -1749,18 +1784,12 @@ func (sm *hsm[T]) execute(ctx context.Context, element *behavior[T], event *Even
 	case kind.Concurrent:
 		ctx := sm.activate(sm.context, element)
 		go func(ctx *active, event Event) {
-			defer func() {
-				if r := recover(); r != nil {
-					go sm.Dispatch(ctx, ErrorEvent.WithData(fmt.Errorf("panic in concurrent behavior %s: %s", element.QualifiedName(), r)))
-				}
-				if ch, ok := sm.after.activities.LoadAndDelete(element.QualifiedName()); ok {
-					close(ch.(chan struct{}))
-				}
-			}()
+			defer cleanup(ctx, sm, element)
 			element.operation(ctx, sm.instance, event)
 			ctx.channel <- struct{}{}
 		}(ctx, *event)
 	default:
+		defer cleanup(ctx, sm, element)
 		element.operation(ctx, sm.instance, *event)
 	}
 
@@ -2082,8 +2111,8 @@ func AfterExit(ctx context.Context, hsm Instance, state string) <-chan struct{} 
 	return ch.(chan struct{})
 }
 
-func AfterActivity(ctx context.Context, hsm Instance, state string) <-chan struct{} {
-	ch, _ := hsm.channels().activities.LoadOrStore(state, make(chan struct{}))
+func AfterExecuted(ctx context.Context, hsm Instance, state string) <-chan struct{} {
+	ch, _ := hsm.channels().executed.LoadOrStore(state, make(chan struct{}))
 	return ch.(chan struct{})
 }
 

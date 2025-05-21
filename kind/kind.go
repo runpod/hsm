@@ -83,6 +83,7 @@ type kinds struct {
 	Concurrent      uint64
 	StateMachine    uint64
 	Namespace       uint64
+	Region          uint64
 	State           uint64
 	Transition      uint64
 	Internal        uint64
@@ -111,6 +112,7 @@ var (
 	Concurrent      = Kind(id.Next(), Behavior)
 	StateMachine    = Kind(id.Next(), Behavior, Namespace)
 	State           = Kind(id.Next(), Vertex, Namespace)
+	Region          = Kind(id.Next(), Element)
 	Transition      = Kind(id.Next(), Element)
 	Internal        = Kind(id.Next(), Transition)
 	External        = Kind(id.Next(), Transition)
@@ -135,6 +137,7 @@ var Kinds = sync.OnceValue(func() (kinds kinds) {
 	kinds.Behavior = Behavior
 	kinds.Concurrent = Concurrent
 	kinds.StateMachine = StateMachine
+	kinds.Region = Region
 	kinds.State = State
 	kinds.Transition = Transition
 	kinds.Namespace = Namespace
