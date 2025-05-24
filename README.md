@@ -81,6 +81,7 @@ type MyHSM struct {
     counter int
 }
 
+
 // Create the state machine model
 model := hsm.Define(
     "example",
