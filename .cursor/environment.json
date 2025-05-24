@@ -1,0 +1,5 @@
+{
+  "snapshot": "snapshot-20250524-7b868979-327a-477c-80cc-165e1892a359",
+  "install": "go get -v ./...",
+  "terminals": []
+}
