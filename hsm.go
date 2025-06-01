@@ -154,7 +154,6 @@ type state struct {
 	exit       []string
 	activities []string
 	deferred   []string
-	regions    map[string]struct{}
 }
 
 func (state *state) Entry() []string {
@@ -167,14 +166,6 @@ func (state *state) Activities() []string {
 
 func (state *state) Exit() []string {
 	return state.exit
-}
-
-/******* Region *******/
-
-type region struct {
-	element
-	initial  string
-	vertices map[string]struct{}
 }
 
 /******* Transition *******/
@@ -525,23 +516,6 @@ func IsAncestor(current, target string) bool {
 		parent = path.Dir(parent)
 	}
 	return false
-}
-
-func Region(name string, partialElements ...RedefinableElement) RedefinableElement {
-	traceback := traceback()
-	return func(model *Model, stack []elements.NamedElement) elements.NamedElement {
-		owner := find(stack, kind.Namespace)
-		if owner == nil {
-			traceback(fmt.Errorf("region \"%s\" must be called within Define() or State()", name))
-		}
-		element := &region{
-			element: element{kind: kind.Region, qualifiedName: path.Join(owner.QualifiedName(), name)},
-		}
-		model.members[element.QualifiedName()] = element
-		stack = append(stack, element)
-		apply(model, stack, partialElements...)
-		return element
-	}
 }
 
 // Transition creates a new transition between states.
