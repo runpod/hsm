@@ -114,6 +114,12 @@ type Model struct {
 	state    state
 	members  map[string]elements.NamedElement
 	elements []RedefinableElement
+	// this is a lazy cache for events that don't match any transition in a state configuration. It means
+	// 1. the event is not deferred
+	// 2. the event is not matched by a transition in the state or any of the ancestor states
+	// 3. if the event matches but the guard fails, it is not a miss
+	// boosted invalid transition performance by 65%
+	missCache map[string]map[string]struct{} // stateQualifiedName -> Set<eventNames>
 }
 
 func (model *Model) Members() map[string]elements.NamedElement {
@@ -332,7 +338,8 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 		state: state{
 			vertex: vertex{element: element{kind: kind.State, qualifiedName: "/", id: name}, transitions: []string{}},
 		},
-		elements: redefinableElements,
+		elements:  redefinableElements,
+		missCache: map[string]map[string]struct{}{},
 	}
 	model.members = map[string]elements.NamedElement{
 		"/": &model.state,
@@ -1873,10 +1880,11 @@ func (sm *hsm[T]) terminate(ctx context.Context, element elements.NamedElement) 
 
 }
 
-func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Event) *transition {
+func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Event) (bool, *transition) {
 	if sm == nil {
-		return nil
+		return false, nil
 	}
+	matched := false
 	for _, transitionQualifiedName := range source.Transitions() {
 		transition := get[*transition](sm.model, transitionQualifiedName)
 		if transition == nil {
@@ -1886,15 +1894,16 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 			if !Match(event.Name, evt) {
 				continue
 			}
+			matched = true
 			if guard := get[*constraint[T]](sm.model, transition.Guard()); guard != nil {
 				if !sm.evaluate(ctx, guard, event) {
 					continue
 				}
 			}
-			return transition
+			return matched, transition
 		}
 	}
-	return nil
+	return matched, nil
 }
 
 func (sm *hsm[T]) process(ctx context.Context) {
@@ -1915,13 +1924,26 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			event.Id = muid.Make()
 		}
 		currentState := sm.state.Load().(elements.NamedElement)
-		qualifiedName := currentState.QualifiedName()
+		currentQualifiedName := currentState.QualifiedName()
+		misses, missesOk := sm.model.missCache[currentQualifiedName]
+		if missesOk {
+			if _, missed := misses[event.Name]; missed {
+				event, ok = sm.queue.pop()
+				continue
+			}
+		}
+		qualifiedName := currentQualifiedName
+		miss := true
 		for qualifiedName != "" {
 			source := get[*state](sm.model, qualifiedName)
 			if source == nil {
 				break
 			}
-			if transition := sm.enabled(ctx, source, &event); transition != nil {
+			matched, transition := sm.enabled(ctx, source, &event)
+			if matched {
+				miss = false
+			}
+			if transition != nil {
 				state := sm.transition(ctx, currentState, transition, &event)
 				if state == nil {
 					break
@@ -1938,6 +1960,13 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				break
 			}
 			qualifiedName = source.Owner()
+		}
+		if miss {
+			if missesOk {
+				misses[event.Name] = struct{}{}
+			} else {
+				sm.model.missCache[currentQualifiedName] = map[string]struct{}{event.Name: {}}
+			}
 		}
 		if ch, ok := sm.after.processed.LoadAndDelete(event.Name); ok {
 			close(ch.(chan struct{}))

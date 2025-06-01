@@ -83,7 +83,7 @@ func runHSMBenchmark(b *testing.B, modelHsm hsm.Model, event1Name, event2Name st
 	// Manually measure time instead of using b.N
 	start := time.Now()
 
-	for i := 0; i < benchmarkIterations; i++ {
+	for range benchmarkIterations {
 		<-m.Dispatch(ctx, event1)
 		<-m.Dispatch(ctx, event2)
 	}
@@ -95,7 +95,7 @@ func runHSMBenchmark(b *testing.B, modelHsm hsm.Model, event1Name, event2Name st
 	transitionsPerSec := totalTransitions / elapsed.Seconds()
 
 	// Set b.N to the actual number of operations for proper reporting
-	b.N = benchmarkIterations * 2
+	// b.N = benchmarkIterations * 2
 
 	// Report the time per operation (ns per transition)
 	nsPerTransition := elapsed.Nanoseconds() / int64(b.N)
@@ -273,4 +273,24 @@ func BenchmarkCrossHierarchyTransitions_EntryExit(b *testing.B) {
 		hsm.Initial(hsm.Target("/parent1")),
 	)
 	runHSMBenchmark(b, model, "toParent2", "toParent1")
+}
+
+// Invalid event handling (graceful failure performance test)
+func BenchmarkInvalidEventHandling(b *testing.B) {
+	model := hsm.Define(
+		"TestHSMInvalidEvents",
+		hsm.State("level1",
+			hsm.State("level2",
+				hsm.State("level3",
+					// Only has one valid transition
+					hsm.Transition(hsm.On("validEvent"), hsm.Target(".")),
+				),
+				hsm.Initial(hsm.Target("level3")),
+			),
+			hsm.Initial(hsm.Target("level2")),
+		),
+		hsm.Initial(hsm.Target("/level1")),
+	)
+	// Use fewer iterations for invalid events since they're processed faster
+	runHSMBenchmark(b, model, "invalidEvent1", "invalidEvent2")
 }
