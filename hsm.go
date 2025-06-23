@@ -359,17 +359,17 @@ func buildCaches(model *Model) {
 	// Build transitionMap and deferredMap for fast lookups
 	// For each state, we build a map that includes ALL transitions accessible from that state
 	// by walking up the hierarchy. This gives us O(1) lookup without hierarchy traversal at runtime.
-	
+
 	for qualifiedName, element := range model.members {
 		// Build transition maps for all vertex types (states, pseudostates, etc)
 		if _, ok := element.(elements.Vertex); !ok {
 			continue
 		}
-		
+
 		// Initialize maps for this state
 		model.transitionMap[qualifiedName] = make(map[string][]*transition)
 		model.deferredMap[qualifiedName] = make(map[string]struct{})
-		
+
 		// Build a path from root to current state
 		var pathToState []string
 		currentPath := qualifiedName
@@ -380,7 +380,7 @@ func buildCaches(model *Model) {
 			}
 			currentPath = path.Dir(currentPath)
 		}
-		
+
 		// Walk from state to root, so more specific transitions come first (higher priority)
 		for i := len(pathToState) - 1; i >= 0; i-- {
 			statePath := pathToState[i]
@@ -388,7 +388,7 @@ func buildCaches(model *Model) {
 			if currentElement == nil {
 				continue
 			}
-			
+
 			// Collect transitions at this level
 			if vertex, ok := currentElement.(elements.Vertex); ok {
 				for _, transitionQualifiedName := range vertex.Transitions() {
@@ -400,7 +400,7 @@ func buildCaches(model *Model) {
 					}
 				}
 			}
-			
+
 			// Collect deferred events at this level
 			if state, ok := currentElement.(*state); ok {
 				for _, deferredEvent := range state.deferred {
@@ -422,7 +422,7 @@ func buildCaches(model *Model) {
 							}
 						}
 					}
-					
+
 					if !hasTransition {
 						model.deferredMap[qualifiedName][deferredEvent] = struct{}{}
 					}
@@ -472,7 +472,6 @@ func getFunctionName(fn any) string {
 	}
 	return path.Base(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
 }
-
 
 // State creates a new state element with the given name and optional child elements.
 // States can have entry/exit actions, activities, and transitions.
@@ -1920,7 +1919,7 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 		return false, nil
 	}
 	matched := false
-	
+
 	// Use transitionMap for fast lookup if available
 	if eventTransitions, ok := sm.model.transitionMap[source.QualifiedName()]; ok {
 		if transitions, ok := eventTransitions[event.Name]; ok {
@@ -1934,11 +1933,11 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 				return matched, transition
 			}
 		}
-		
+
 		// If we have a transitionMap for this state, we've checked all possibilities
 		return matched, nil
 	}
-	
+
 	// Fallback to original method if transitionMap not available
 	for _, transitionQualifiedName := range source.Transitions() {
 		transition := get[*transition](sm.model, transitionQualifiedName)
@@ -1980,7 +1979,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		}
 		currentState := sm.state.Load().(elements.NamedElement)
 		currentQualifiedName := currentState.QualifiedName()
-		
+
 		// Check if event is deferred using O(1) lookup
 		if deferredSet, ok := sm.model.deferredMap[currentQualifiedName]; ok {
 			if _, isDeferred := deferredSet[event.Name]; isDeferred {
@@ -1989,7 +1988,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				continue
 			}
 		}
-		
+
 		// Direct O(1) lookup for transitions - no hierarchy walking needed
 		if transitions, ok := sm.model.transitionMap[currentQualifiedName][event.Name]; ok {
 			for _, transition := range transitions {
@@ -2009,7 +2008,7 @@ func (sm *hsm[T]) process(ctx context.Context) {
 				break
 			}
 		}
-		
+
 		if ch, ok := sm.after.processed.LoadAndDelete(event.Name); ok {
 			close(ch.(chan struct{}))
 		}
