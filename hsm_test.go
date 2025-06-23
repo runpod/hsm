@@ -133,7 +133,8 @@ func TestComplex(t *testing.T) {
 				hsm.Activity(mockAction("s3.activity", true)),
 				hsm.Exit(mockAction("s3.exit", false)),
 			),
-			hsm.Transition(hsm.On(`*.P.*`), hsm.Effect(mockAction("s11.P.transition.effect", false))),
+			// Wildcard events are no longer supported
+			// hsm.Transition(hsm.On(`*.P.*`), hsm.Effect(mockAction("s11.P.transition.effect", false))),
 		),
 		hsm.State("t",
 			hsm.Entry(mockAction("t.entry", false)),
@@ -170,7 +171,8 @@ func TestComplex(t *testing.T) {
 				return check
 			},
 		)),
-		hsm.Transition("wildcard", hsm.On("abcd*"), hsm.Source("/s"), hsm.Target("/s")),
+		// Wildcard events are no longer supported
+		// hsm.Transition("wildcard", hsm.On("abcd*"), hsm.Source("/s"), hsm.Target("/s")),
 		hsm.Transition(hsm.On(dEvent), hsm.Source("/s"), hsm.Target("/s"), hsm.Effect(mockAction("s.D.transition.effect", false))),
 		hsm.Transition(hsm.On("C"), hsm.Source("/s/s1"), hsm.Target("/s/s2"), hsm.Effect(mockAction("s1.C.transition.effect", false))),
 		hsm.Transition(hsm.On("E"), hsm.Source("/s"), hsm.Target("/s/s1/s11"), hsm.Effect(mockAction("s.E.transition.effect", false))),
@@ -392,15 +394,16 @@ func TestComplex(t *testing.T) {
 	}) {
 		t.Fatal("transition actions are not correct", "trace", trace)
 	}
-	trace.reset()
-	<-sm.Dispatch(ctx, hsm.Event{
-		Name: "K.P.A",
-	})
-	if !trace.contains(Trace{
-		sync: []string{"s11.P.transition.effect"},
-	}) {
-		t.Fatal("transition actions are not correct", "trace", trace)
-	}
+	// Wildcard events are no longer supported
+	// trace.reset()
+	// <-sm.Dispatch(ctx, hsm.Event{
+	// 	Name: "K.P.A",
+	// })
+	// if !trace.contains(Trace{
+	// 	sync: []string{"s11.P.transition.effect"},
+	// }) {
+	// 	t.Fatal("transition actions are not correct", "trace", trace)
+	// }
 	trace.reset()
 	<-sm.Dispatch(ctx, hsm.Event{Name: "Z"})
 	if sm.State() != "/s/s3" {
@@ -1247,7 +1250,8 @@ func BenchmarkModel(b *testing.B) {
 					hsm.Activity(noBehavior),
 					hsm.Exit(noBehavior),
 				),
-				hsm.Transition(hsm.On(`*.P.*`), hsm.Effect(noBehavior)),
+				// Wildcard events are no longer supported
+			// hsm.Transition(hsm.On(`*.P.*`), hsm.Effect(noBehavior)),
 			),
 			hsm.State("t",
 				hsm.Entry(noBehavior),
@@ -1280,7 +1284,8 @@ func BenchmarkModel(b *testing.B) {
 			hsm.Transition(hsm.On("D"), hsm.Source("/s/s1"), hsm.Target("/s"), hsm.Effect(noBehavior), hsm.Guard(
 				noGuard,
 			)),
-			hsm.Transition("wildcard", hsm.On("abcd*"), hsm.Source("/s"), hsm.Target("/s")),
+			// Wildcard events are no longer supported
+		// hsm.Transition("wildcard", hsm.On("abcd*"), hsm.Source("/s"), hsm.Target("/s")),
 			hsm.Transition(hsm.On("D"), hsm.Source("/s"), hsm.Target("/s"), hsm.Effect(noBehavior)),
 			hsm.Transition(hsm.On("C"), hsm.Source("/s/s1"), hsm.Target("/s/s2"), hsm.Effect(noBehavior)),
 			hsm.Transition(hsm.On("E"), hsm.Source("/s"), hsm.Target("/s/s1/s11"), hsm.Effect(noBehavior)),

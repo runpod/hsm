@@ -114,12 +114,10 @@ type Model struct {
 	state    state
 	members  map[string]elements.NamedElement
 	elements []RedefinableElement
-	// this is a lazy cache for events that don't match any transition in a state configuration. It means
-	// 1. the event is not deferred
-	// 2. the event is not matched by a transition in the state or any of the ancestor states
-	// 3. if the event matches but the guard fails, it is not a miss
-	// boosted invalid transition performance by 65%
-	missCache map[string]map[string]struct{} // stateQualifiedName -> Set<eventNames>
+	// transitionMap provides fast lookup of transitions by state and event name
+	transitionMap map[string]map[string][]*transition // stateQualifiedName -> eventName -> transitions
+	// deferredMap provides fast lookup of deferred events by state
+	deferredMap map[string]map[string]struct{} // stateQualifiedName -> Set<deferredEventNames>
 }
 
 func (model *Model) Members() map[string]elements.NamedElement {
@@ -329,8 +327,9 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 		state: state{
 			vertex: vertex{element: element{kind: kind.State, qualifiedName: "/", id: name}, transitions: []string{}},
 		},
-		elements:  redefinableElements,
-		missCache: map[string]map[string]struct{}{},
+		elements:      redefinableElements,
+		transitionMap: map[string]map[string][]*transition{},
+		deferredMap:   map[string]map[string]struct{}{},
 	}
 	model.members = map[string]elements.NamedElement{
 		"/": &model.state,
@@ -352,7 +351,85 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 		panic(fmt.Errorf("exit actions are not allowed on top level state machine %s", model.state.id))
 	}
 	model.qualifiedName = name
+	buildCaches(&model)
 	return model
+}
+
+func buildCaches(model *Model) {
+	// Build transitionMap and deferredMap for fast lookups
+	// For each state, we build a map that includes ALL transitions accessible from that state
+	// by walking up the hierarchy. This gives us O(1) lookup without hierarchy traversal at runtime.
+	
+	for qualifiedName, element := range model.members {
+		// Build transition maps for all vertex types (states, pseudostates, etc)
+		if _, ok := element.(elements.Vertex); !ok {
+			continue
+		}
+		
+		// Initialize maps for this state
+		model.transitionMap[qualifiedName] = make(map[string][]*transition)
+		model.deferredMap[qualifiedName] = make(map[string]struct{})
+		
+		// Build a path from root to current state
+		var pathToState []string
+		currentPath := qualifiedName
+		for currentPath != "" {
+			pathToState = append([]string{currentPath}, pathToState...)
+			if currentPath == "/" {
+				break
+			}
+			currentPath = path.Dir(currentPath)
+		}
+		
+		// Walk from state to root, so more specific transitions come first (higher priority)
+		for i := len(pathToState) - 1; i >= 0; i-- {
+			statePath := pathToState[i]
+			currentElement := model.members[statePath]
+			if currentElement == nil {
+				continue
+			}
+			
+			// Collect transitions at this level
+			if vertex, ok := currentElement.(elements.Vertex); ok {
+				for _, transitionQualifiedName := range vertex.Transitions() {
+					if trans := get[*transition](model, transitionQualifiedName); trans != nil {
+						// Add all transitions - more specific ones will be checked first in process
+						for _, eventName := range trans.events {
+							model.transitionMap[qualifiedName][eventName] = append(model.transitionMap[qualifiedName][eventName], trans)
+						}
+					}
+				}
+			}
+			
+			// Collect deferred events at this level
+			if state, ok := currentElement.(*state); ok {
+				for _, deferredEvent := range state.deferred {
+					// Check if this event has a transition at the current state level
+					// If so, it's not deferred from this state
+					hasTransition := false
+					if vertex, ok := element.(elements.Vertex); ok {
+						for _, transQualifiedName := range vertex.Transitions() {
+							if trans := get[*transition](model, transQualifiedName); trans != nil {
+								for _, eventName := range trans.events {
+									if eventName == deferredEvent {
+										hasTransition = true
+										break
+									}
+								}
+							}
+							if hasTransition {
+								break
+							}
+						}
+					}
+					
+					if !hasTransition {
+						model.deferredMap[qualifiedName][deferredEvent] = struct{}{}
+					}
+				}
+			}
+		}
+	}
 }
 
 func find(stack []elements.NamedElement, maybeKinds ...uint64) elements.NamedElement {
@@ -396,14 +473,6 @@ func getFunctionName(fn any) string {
 	return path.Base(runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name())
 }
 
-func hasWildcard(events ...string) bool {
-	for _, event := range events {
-		if strings.Contains(event, "*") {
-			return true
-		}
-	}
-	return false
-}
 
 // State creates a new state element with the given name and optional child elements.
 // States can have entry/exit actions, activities, and transitions.
@@ -447,15 +516,7 @@ func State(name string, partialElements ...RedefinableElement) RedefinableElemen
 					traceback(fmt.Errorf("missing transition \"%s\" for state \"%s\"", j, element.QualifiedName()))
 					return 1 // because the linter doesn't know that traceback will panic
 				}
-				// If j has wildcard and i doesn't, i comes first
-				hasWildcardI := hasWildcard(transitionI.events...)
-				hasWildcardJ := hasWildcard(transitionJ.events...)
-				if hasWildcardI && !hasWildcardJ {
-					return 1 // Sort transitionI (wildcard) after transitionJ
-				}
-				if !hasWildcardI && hasWildcardJ {
-					return -1 // Sort transitionI (non-wildcard) before transitionJ
-				}
+				// No wildcard prioritization needed anymore
 				return 0
 			})
 			return element
@@ -1859,13 +1920,33 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 		return false, nil
 	}
 	matched := false
+	
+	// Use transitionMap for fast lookup if available
+	if eventTransitions, ok := sm.model.transitionMap[source.QualifiedName()]; ok {
+		if transitions, ok := eventTransitions[event.Name]; ok {
+			matched = true
+			for _, transition := range transitions {
+				if guard := get[*constraint[T]](sm.model, transition.Guard()); guard != nil {
+					if !sm.evaluate(ctx, guard, event) {
+						continue
+					}
+				}
+				return matched, transition
+			}
+		}
+		
+		// If we have a transitionMap for this state, we've checked all possibilities
+		return matched, nil
+	}
+	
+	// Fallback to original method if transitionMap not available
 	for _, transitionQualifiedName := range source.Transitions() {
 		transition := get[*transition](sm.model, transitionQualifiedName)
 		if transition == nil {
 			continue
 		}
 		for _, evt := range transition.Events() {
-			if !Match(event.Name, evt) {
+			if event.Name != evt {
 				continue
 			}
 			matched = true
@@ -1899,49 +1980,36 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		}
 		currentState := sm.state.Load().(elements.NamedElement)
 		currentQualifiedName := currentState.QualifiedName()
-		misses, missesOk := sm.model.missCache[currentQualifiedName]
-		if missesOk {
-			if _, missed := misses[event.Name]; missed {
+		
+		// Check if event is deferred using O(1) lookup
+		if deferredSet, ok := sm.model.deferredMap[currentQualifiedName]; ok {
+			if _, isDeferred := deferredSet[event.Name]; isDeferred {
+				deferred = append(deferred, event)
 				event, ok = sm.queue.pop()
 				continue
 			}
 		}
-		qualifiedName := currentQualifiedName
-		miss := true
-		for qualifiedName != "" {
-			source := get[*state](sm.model, qualifiedName)
-			if source == nil {
-				break
-			}
-			matched, transition := sm.enabled(ctx, source, &event)
-			if matched {
-				miss = false
-			}
-			if transition != nil {
+		
+		// Direct O(1) lookup for transitions - no hierarchy walking needed
+		if transitions, ok := sm.model.transitionMap[currentQualifiedName][event.Name]; ok {
+			for _, transition := range transitions {
+				if guard := get[*constraint[T]](sm.model, transition.Guard()); guard != nil {
+					if !sm.evaluate(ctx, guard, &event) {
+						continue
+					}
+				}
 				state := sm.transition(ctx, currentState, transition, &event)
-				if state == nil {
-					break
-				}
-				sm.state.Store(state)
-				if len(deferred) > 0 {
-					sm.queue.push(deferred...)
-					deferred = nil
+				if state != nil {
+					sm.state.Store(state)
+					if len(deferred) > 0 {
+						sm.queue.push(deferred...)
+						deferred = nil
+					}
 				}
 				break
 			}
-			if len(source.deferred) > 0 && Match(event.Name, source.deferred...) {
-				deferred = append(deferred, event)
-				break
-			}
-			qualifiedName = source.Owner()
 		}
-		if miss {
-			if missesOk {
-				misses[event.Name] = struct{}{}
-			} else {
-				sm.model.missCache[currentQualifiedName] = map[string]struct{}{event.Name: {}}
-			}
-		}
+		
 		if ch, ok := sm.after.processed.LoadAndDelete(event.Name); ok {
 			close(ch.(chan struct{}))
 		}
