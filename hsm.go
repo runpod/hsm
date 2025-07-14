@@ -1433,6 +1433,8 @@ type timeouts struct {
 	activity time.Duration
 }
 
+// mutex is a mutex that also has a signal for when all work guarded by the mutex is done.
+// It is used by hsm internally to signal when a batch of work is done.
 type mutex struct {
 	internal sync.Mutex
 	signal   atomic.Value
@@ -1444,8 +1446,8 @@ func (mutex *mutex) lock() {
 }
 
 func (mutex *mutex) unlock() {
-	mutex.internal.Unlock()
 	signal := mutex.signal.Load().(chan struct{})
+	mutex.internal.Unlock()
 	close(signal)
 }
 
