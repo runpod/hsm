@@ -740,6 +740,60 @@ sm := hsm.Start(ctx, &MyHSM{}, &model, hsm.Config{
 
 ```
 
+
+## Concurrency Model
+### Event Dispatching (Highly Concurrent)
+
+Multiple threads can simultaneously send events to a state machine. When you dispatch an event, it's immediately added to a thread-safe queue and you get back a "completion channel" that signals when that event has been fully processed. This layer is designed for maximum throughput - there's no blocking or waiting.
+
+### Event Processing (Asynchronous but Serialized)
+
+Behind the scenes, a single background worker processes the event queue. This worker follows a "drain-to-empty" pattern: it grabs the processing lock, then continuously pulls events from the queue until it's completely empty before releasing the lock. This ensures that:
+
+* State transitions happen in a predictable order
+* No race conditions occur during state changes
+* The system can handle bursts of events efficiently
+
+Only one processor can run at a time per state machine instance, but multiple state machine instances can process events concurrently.
+
+### Activities (Fully Concurrent)
+
+Long-running behaviors (called "activities") execute in their own goroutines and can run alongside event processing. These include things like timers, periodic tasks, or any ongoing work that needs to happen while in a particular state.
+
+### Event Priority System
+
+The queue distinguishes between regular events and completion events. Completion events get higher priority and are processed in LIFO order, while regular events are processed FIFO.
+
+
+> Completion events have dispatching priority. That is, they are dispatched ahead of any pending Event occurrences in the
+> event pool. If two or more completion events corresponding to multiple orthogonal Regions occur simultaneously (i.e.,
+> as a result of the same Event occurrence), the order in which such completion occurrences are processed is not defined.
+> Completion of all top level Regions in a StateMachine corresponds to a completion of the Behavior of the StateMachine
+> and results in its termination.
+
+source: [UML Specification](https://www.omg.org/spec/UML/2.5.1/PDF)
+
+### Deferred Event Handling
+
+Events can be marked as "deferred" in certain states. When an event is deferred, it's set aside and returned to the event queue when the state machine moves to a state that can handle it. This happens automatically during queue processing.
+
+> Deferred Events
+> A State may specify a set of Event types that may be deferred in that State. This means that Event occurrences of those
+> types will not be dispatched as long as that State remains active. Instead, these Event occurrences remain in the event
+> pool until:
+> - a state configuration is reached where these Event types are no longer deferred or,
+> - if a deferred Event type is used explicitly in a Trigger of a Transition whose source is the deferring State (i.e., a
+> kind of override option).
+> An Event may be deferred by a composite State or submachine States, in which case it remains deferred as long as the
+> composite State remains in the active configuration.
+
+source: [UML Specification](https://www.omg.org/spec/UML/2.5.1/PDF)
+
+### Graceful Shutdown
+
+When stopping a state machine, activities are given time to finish cleanly through context cancellation. If they don't respond within a timeout, the system logs an error but continues shutdown to prevent hanging.
+
+
 ## Roadmap
 
 Current and planned features:
