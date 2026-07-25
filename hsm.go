@@ -119,7 +119,19 @@ type Model struct {
 	// 2. the event is not matched by a transition in the state or any of the ancestor states
 	// 3. if the event matches but the guard fails, it is not a miss
 	// boosted invalid transition performance by 65%
-	missCache map[string]map[string]struct{} // stateQualifiedName -> Set<eventNames>
+	misses *missCache
+}
+
+// missCache is the lazy invalid-transition cache. It is heap-allocated and
+// shared by every instance built from a Model — and by every copy of the Model
+// itself, since Define returns a Model by value. Keeping it behind a pointer
+// lets Model stay copyable while still sharing one guarded cache: embedding the
+// mutex in Model directly would make copying a Model a lock-copy bug (go vet
+// copylocks). process() reads/writes it from concurrent instance goroutines,
+// so all access is guarded by mu.
+type missCache struct {
+	mu      sync.RWMutex
+	entries map[string]map[string]struct{} // stateQualifiedName -> Set<eventNames>
 }
 
 func (model *Model) Members() map[string]elements.NamedElement {
@@ -330,7 +342,7 @@ func Define[T interface{ RedefinableElement | string }](nameOrRedefinableElement
 			vertex: vertex{element: element{kind: kind.State, qualifiedName: "/", id: name}, transitions: []string{}},
 		},
 		elements:  redefinableElements,
-		missCache: map[string]map[string]struct{}{},
+		misses:    &missCache{entries: map[string]map[string]struct{}{}},
 	}
 	model.members = map[string]elements.NamedElement{
 		"/": &model.state,
@@ -1901,12 +1913,12 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		}
 		currentState := sm.state.Load().(elements.NamedElement)
 		currentQualifiedName := currentState.QualifiedName()
-		misses, missesOk := sm.model.missCache[currentQualifiedName]
-		if missesOk {
-			if _, missed := misses[event.Name]; missed {
-				event, ok = sm.queue.pop()
-				continue
-			}
+		sm.model.misses.mu.RLock()
+		_, missed := sm.model.misses.entries[currentQualifiedName][event.Name]
+		sm.model.misses.mu.RUnlock()
+		if missed {
+			event, ok = sm.queue.pop()
+			continue
 		}
 		qualifiedName := currentQualifiedName
 		miss := true
@@ -1938,11 +1950,13 @@ func (sm *hsm[T]) process(ctx context.Context) {
 			qualifiedName = source.Owner()
 		}
 		if miss {
-			if missesOk {
-				misses[event.Name] = struct{}{}
+			sm.model.misses.mu.Lock()
+			if set, ok := sm.model.misses.entries[currentQualifiedName]; ok {
+				set[event.Name] = struct{}{}
 			} else {
-				sm.model.missCache[currentQualifiedName] = map[string]struct{}{event.Name: {}}
+				sm.model.misses.entries[currentQualifiedName] = map[string]struct{}{event.Name: {}}
 			}
+			sm.model.misses.mu.Unlock()
 		}
 		if ch, ok := sm.after.processed.LoadAndDelete(event.Name); ok {
 			close(ch.(chan struct{}))
