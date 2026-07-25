@@ -1444,8 +1444,10 @@ func (mutex *mutex) lock() {
 }
 
 func (mutex *mutex) unlock() {
-	mutex.internal.Unlock()
+	// Load the signal while internal is held; a tryLock after Unlock could Store
+	// a fresh one and we'd close the new owner's channel twice.
 	signal := mutex.signal.Load().(chan struct{})
+	mutex.internal.Unlock()
 	close(signal)
 }
 
