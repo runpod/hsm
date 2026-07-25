@@ -2,6 +2,7 @@ package hsm_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"slices"
@@ -1309,4 +1310,49 @@ func BenchmarkModel(b *testing.B) {
 			hsm.Transition(hsm.On("X"), hsm.Effect(noBehavior), hsm.Source("/s/s3"), hsm.Target("/t/u")),
 		)
 	}
+}
+
+// TestMissCacheConcurrentInstances drives many instances of a single shared
+// Model with events that never match a transition, so every process() call
+// records a miss into the model-level cache. That cache is shared by all
+// instances; before it was guarded, concurrent instances wrote the same map at
+// once — a Go fatal "concurrent map writes" (a hard crash, not a recoverable
+// panic), which also trips the race detector under -race.
+func TestMissCacheConcurrentInstances(t *testing.T) {
+	model := hsm.Define(
+		"MissCacheHSM",
+		hsm.State("a"),
+		hsm.State("b"),
+		hsm.Transition(hsm.On("toB"), hsm.Source("a"), hsm.Target("b")),
+		hsm.Transition(hsm.On("toA"), hsm.Source("b"), hsm.Target("a")),
+		hsm.Initial(hsm.Target("a")),
+	)
+	ctx := context.Background()
+
+	const (
+		instances  = 16
+		iterations = 150
+	)
+	sms := make([]*THSM, instances)
+	for i := range sms {
+		sms[i] = hsm.Start(ctx, &THSM{}, &model)
+	}
+
+	var wg sync.WaitGroup
+	for _, sm := range sms {
+		wg.Add(1)
+		go func(sm *THSM) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				// Unmatched events record a miss under the current state's key;
+				// distinct names grow the inner set, and toB/toA flip the state
+				// so misses land under different cache keys.
+				<-sm.Dispatch(ctx, hsm.Event{Name: "nomatch"})
+				<-sm.Dispatch(ctx, hsm.Event{Name: fmt.Sprintf("nomatch-%d", j)})
+				<-sm.Dispatch(ctx, hsm.Event{Name: "toB"})
+				<-sm.Dispatch(ctx, hsm.Event{Name: "toA"})
+			}
+		}(sm)
+	}
+	wg.Wait()
 }

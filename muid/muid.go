@@ -43,15 +43,23 @@ var (
 
 		hostname, err := os.Hostname()
 		var machineID uint64
-		if err != nil || hostname == "" {
-			// Fallback: random value masked to machineBitLen
-			var b [8]byte          // Read enough bytes for uint64
+		// Fallback used when the hostname is unavailable, or if hashing fails.
+		randomMachineID := func() uint64 {
+			var b [8]byte
 			_, _ = rand.Read(b[:]) // best effort
-			machineID = binary.BigEndian.Uint64(b[:]) & machineIdMask
-		} else {
+			return binary.BigEndian.Uint64(b[:]) & machineIdMask
+		}
+		switch {
+		case err != nil || hostname == "":
+			machineID = randomMachineID()
+		default:
 			hash := fnv.New64a()
-			hash.Write([]byte(hostname))
-			machineID = hash.Sum64() & machineIdMask
+			// hash.Hash.Write never errors; fall back anyway rather than discard it.
+			if _, werr := hash.Write([]byte(hostname)); werr != nil {
+				machineID = randomMachineID()
+			} else {
+				machineID = hash.Sum64() & machineIdMask
+			}
 		}
 		config.MachineID = machineID
 		return config
@@ -182,7 +190,8 @@ func NewGenerator(config Config, shardIndex uint64, shardBitLen int) *Generator 
 // virtually to ensure monotonicity.
 func (g *Generator) ID() MUID {
 	for {
-		now := uint64(time.Now().UnixMilli() - g.epoch)
+		// epoch is a fixed past instant, so the delta is non-negative and cannot overflow.
+		now := uint64(time.Now().UnixMilli() - g.epoch) // #nosec G115
 
 		previousState := g.state.Load()
 		// Extract last timestamp and counter from the packed state.
