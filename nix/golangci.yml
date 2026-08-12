@@ -1,0 +1,28 @@
+version: "2"
+
+# Correctness- and concurrency-focused set. Style/complexity linters are
+# deliberately omitted: this sweep exists to surface bugs (like the shared-map
+# and signal-double-close races), not to reformat the library.
+linters:
+  default: none
+  enable:
+    - govet # copylocks, atomic, loopclosure, unusedresult, ...
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - bodyclose
+    - contextcheck
+    - durationcheck
+    - errorlint
+    - nilerr
+    - noctx
+    - rowserrcheck
+    - sqlclosecheck
+    - gosec
+  settings:
+    govet:
+      enable-all: true
+    gosec:
+      excludes:
+        - G404 # weak RNG — not relevant to correctness sweep
