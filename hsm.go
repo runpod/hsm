@@ -300,6 +300,11 @@ func (q *queue) pop() (Event, bool) {
 func (q *queue) push(events ...Event) {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
+	q.pushLocked(events...)
+}
+
+// pushLocked requires q.mutex to be held.
+func (q *queue) pushLocked(events ...Event) {
 	for _, event := range events {
 		if kind.IsKind(event.Kind, kind.CompletionEvent) {
 			q.completionEvents = append(q.completionEvents, event)
@@ -1895,17 +1900,30 @@ func (sm *hsm[T]) enabled(ctx context.Context, source elements.Vertex, event *Ev
 }
 
 func (sm *hsm[T]) process(ctx context.Context) {
+	var deferred []Event
 	defer func() {
 		if r := recover(); r != nil {
 			err := fmt.Errorf("hsm: panic while processing event in state machine: %v\n\n%s", r, string(debug.Stack()))
 			go sm.Dispatch(ctx, ErrorEvent.WithData(err))
 		}
-		sm.processing.unlock()
+		// A dispatch can arrive after the last empty pop but before we release
+		// processing. Check under the enqueue lock so it either gets a new
+		// processor here or acquires processing itself after we release it.
+		sm.queue.mutex.Lock()
+		pending := len(sm.queue.events)+len(sm.queue.completionEvents) > 0
+		// Deferred events alone must wait for a later dispatch, not spin.
+		sm.queue.pushLocked(deferred...)
+		if !pending {
+			sm.processing.unlock()
+		}
+		sm.queue.mutex.Unlock()
+		if pending {
+			go sm.process(ctx)
+		}
 	}()
 	if sm == nil {
 		return
 	}
-	var deferred []Event
 	event, ok := sm.queue.pop()
 	for ok {
 		if event.Id == 0 {
@@ -1963,7 +1981,6 @@ func (sm *hsm[T]) process(ctx context.Context) {
 		}
 		event, ok = sm.queue.pop()
 	}
-	sm.queue.push(deferred...)
 }
 
 func (sm *hsm[T]) takeSnapshot() Snapshot {
